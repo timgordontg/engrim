@@ -22,3 +22,6 @@ dist/
 venv/
 env/
 .env
+
+# Local working files (personal drafts, scratch notes) — never committed
+.local/
