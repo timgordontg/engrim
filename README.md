@@ -10,6 +10,10 @@ decisions and facts, tags them by repo, and hands your agent just the relevant s
 of each session and on every prompt — so you can `/clear` aggressively without losing the *why*
 behind your work.
 
+![engrim live in the Claude Code status bar — 44 curated, clear-safe](docs/status-line.jpg)
+
+<sub>engrim, ambient in the Claude Code status bar — it even tells you when it's `✓ clear-safe` to clear.</sub>
+
 > **Clearing your agent's context without engrim feels like closing a doc without hitting save.**
 > We've all got the high-school muscle memory of losing an unsaved assignment — so we *don't* clear,
 > we just keep hammering one bloated session. **engrim is the save button.** Externalize your
