@@ -265,3 +265,24 @@ def test_global_layer_read_in_isolation(tmp_path, capsys):
     main(["--db", str(db), "context", "-p", "__global__"])
     out = capsys.readouterr().out
     assert out.count("the one global record") == 1
+
+
+def test_semantic_floor_admits_paraphrase_near_match(tmp_path, capsys, monkeypatch):
+    """A genuine paraphrase scoring in the 0.30-0.35 band (above noise, below the old 0.35 floor) must
+    still be recalled. Query and record share no words, so the only path to a hit is semantic — this
+    pins _SEM_FLOOR at 0.30 and guards against silently raising it back."""
+    # Fake embedder: record -> [1,0,0]; query -> a vector at cosine 0.32 to it (between 0.30 and 0.35).
+    def _fake_embed(text):
+        if "alpha" in text:
+            return [1.0, 0.0, 0.0]
+        if "bravo" in text:
+            return [0.32, 0.94737, 0.0]   # cosine 0.32 with [1,0,0]
+        return [0.0, 0.0, 1.0]
+
+    monkeypatch.setattr("engrim.cli._EMBEDDER_OVERRIDE", (_fake_embed, "test-embed"))
+
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "decision", "-s", "borderline paraphrase target alpha"])
+    capsys.readouterr()
+    main(["--db", str(db), "recall", "-p", "/p", "-q", "bravo charlie delta"])
+    assert "borderline paraphrase target alpha" in capsys.readouterr().out

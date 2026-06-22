@@ -421,11 +421,13 @@ def _cosine(a, b):
 
 
 # Minimum cosine for a semantic match to count. Below this the static embedder is at noise level
-# (empirically with potion-8M: genuine matches land ~0.50-0.73, unrelated text ~0.00-0.12, with a
-# wide empty gap between). Without a floor, a zero-overlap query returns whatever scores 0.001 above
-# the rest — a confidently-wrong hit. Recall and the minder use this; the stricter capture-check in
-# `review` (_CAPTURED_SIM) is separate, because a false "safe to clear" costs more than a missed hit.
-_SEM_FLOOR = 0.35
+# (empirically with potion-8M: unrelated text ~0.00-0.12; strong matches ~0.50-0.73; short natural-
+# language paraphrases of a record — e.g. "what database did we pick" against a SQLite decision —
+# land ~0.30-0.46). The floor sits at 0.30 to admit those genuine paraphrases while staying well clear
+# of the <0.12 noise band. Lowering it only ever adds matches above 0.30; nothing that cleared the old
+# value drops out. Recall and the minder use this; the stricter capture-check in `review`
+# (_CAPTURED_SIM) is separate, because a false "safe to clear" costs more than a missed hit.
+_SEM_FLOOR = 0.30
 
 
 def _semantic_rows(conn, project, query, k):
