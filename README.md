@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Local & private](https://img.shields.io/badge/local-%26%20private-brightgreen)](#security--privacy)
 
-**Cross-session memory for AI coding agents.** A small local store that remembers your project's
+**Cross-session memory for Claude Code.** A small local store that remembers your project's
 decisions and facts, tags them by repo, and hands your agent just the relevant slice — at the start
 of each session and on every prompt — so you can `/clear` aggressively without losing the *why*
 behind your work.
