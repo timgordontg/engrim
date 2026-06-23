@@ -1,6 +1,7 @@
 # engrim
 
 [![CI](https://github.com/timgordontg/engrim/actions/workflows/ci.yml/badge.svg)](https://github.com/timgordontg/engrim/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/engrim)](https://pypi.org/project/engrim/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Local & private](https://img.shields.io/badge/local-%26%20private-brightgreen)](#security--privacy)
@@ -31,7 +32,7 @@ the engine stays lean and fast, engrim holds the deep, queryable, cross-session 
 on demand.
 
 ```bash
-pip install git+https://github.com/timgordontg/engrim
+pip install engrim
 engrim setup
 ```
 
