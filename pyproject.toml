@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engrim"
-version = "0.8.0"
+dynamic = ["version"]
 description = "Project-scoped, cross-session memory for AI coding agents — hybrid keyword+semantic retrieval over a tagged SQLite store."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,6 +27,9 @@ Homepage = "https://github.com/timgordontg/engrim"
 
 [project.scripts]
 engrim = "engrim.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "engrim.__version__" }   # single source of truth: src/engrim/__init__.py
 
 [tool.setuptools.packages.find]
 where = ["src"]

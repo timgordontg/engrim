@@ -130,6 +130,26 @@ attention than 100k tokens of accumulated cruft).
 > realize they're gone. It's deliberately honest: it nudges you when unsure rather than falsely
 > reassuring you, and only says *"looks safe to clear"* when nothing's outstanding.
 
+### Continue-as-clear: pick up exactly where you left off
+
+`/clear` banks the tokens; the boot pack brings back the *spine*. Two mechanics make the reload feel
+like `--continue` — full awareness of **where you stopped**, at boot-pack cost (hundreds of tokens,
+not a replayed transcript):
+
+- **A pinned resume cursor.** Tag any record `resume-pointer` and the newest one is pinned to the
+  **top** of the boot pack, **untruncated**, under a `[▶ RESUME HERE]` banner — the first thing the
+  next session reads. That's your *cursor* (the next action), not just your conclusions. Refresh it
+  before a heavy clear (`engrim supersede --id <old> --status superseded`, then a fresh `add … --tags
+  resume-pointer`) and the next boot opens on exactly what's next.
+- **An open-task continuity tail.** Even when you *forget* to curate, the boot pack surfaces the last
+  stretch of uncaptured turns that carry open-loop cues — *"pick this up later"*, *"the next step
+  is…"*, *"still need to…"* — so a mid-task clear can't drop your place. It's hard-capped (a few
+  lines, its own tiny budget) so it never bloats context, and the *"safe to clear?"* nudge stays
+  decision-only so it won't nag on ordinary work-in-progress.
+
+Net effect: `/clear` aggressively and reopen oriented on *what you were doing*, not just what you
+decided.
+
 ## "Isn't this just markdown notes / CLAUDE.md?"
 
 No — and the difference is the whole point. Markdown memory is great until it outgrows the context
@@ -225,6 +245,10 @@ want it? `ENGRIM_NO_GLOBAL=1` turns it off and reads go back to project-only.
   - **SessionEnd → `engrim sync --claude`:** a final, seed-gated mirror (no-op once seeded).
 - **Boot-pack priority:** `user` → `feedback` → `state` → `decision` → `fact` → `reference`,
   recent-first within each type, capped to a character budget so it loads cheaply.
+- **Continue-as-clear:** the newest `resume-pointer`-tagged record is pinned to the top of the pack,
+  untruncated, under `[▶ RESUME HERE]`; the pack's recency tail also surfaces recent *uncaptured*
+  open-task/decision turns — so a clear mid-task still reloads where you left off, not just what you
+  decided.
 - **Perf:** each hook is a short-lived process, off the critical path except UserPromptSubmit, where
   it's invisible against model latency. A project with nothing embedded never pays the model-load
   cost.
