@@ -380,6 +380,63 @@ def test_context_recent_tail_dedupes_captured_decision(tmp_path, capsys):
     assert "[RECENT" not in out
 
 
+# --- continue-as-clear: the pinned resume cursor + open-task continuity tail ---
+
+def test_context_pins_resume_cursor_first_and_untruncated(tmp_path, capsys):
+    """A record tagged resume-pointer leads the pack under [▶ RESUME HERE] and is never truncated,
+    so a fresh session after /clear opens on exactly where we left off."""
+    db = tmp_path / "m.db"
+    # a long cursor summary (> _BOOT_SUMMARY_CAP) with a unique sentinel at the very end
+    long_cursor = ("RESUME HERE: next action is discovery pass #3 — gate HMDA denominators, "
+                   "winsorize small-county ratios, add RUCC, then run leave-one-state-out. " * 3
+                   + "TAILSENTINEL_XYZ")
+    assert len(long_cursor) > 200
+    main(["--db", str(db), "add", "-p", "/p", "-t", "state", "-s", long_cursor, "--tags", "resume-pointer"])
+    main(["--db", str(db), "add", "-p", "/p", "-t", "decision", "-s", "we chose postgres for billing"])
+    capsys.readouterr()
+    main(["--db", str(db), "context", "-p", "/p"])
+    out = capsys.readouterr().out
+    assert "[▶ RESUME HERE]" in out
+    # the cursor is untruncated -> its end-sentinel survives (other long records would be clipped)
+    assert "TAILSENTINEL_XYZ" in out
+    # and it leads: the RESUME HERE header precedes the regular type sections
+    assert out.index("[▶ RESUME HERE]") < out.index("[DECISION]")
+
+
+def test_context_no_resume_section_without_tag(tmp_path, capsys):
+    """No resume-pointer record -> no RESUME HERE section; the pack behaves exactly as before."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "decision", "-s", "we chose postgres for billing"])
+    capsys.readouterr()
+    main(["--db", str(db), "context", "-p", "/p"])
+    assert "[▶ RESUME HERE]" not in capsys.readouterr().out
+
+
+def test_recent_tail_surfaces_open_task_cue(tmp_path, capsys):
+    """A mid-task open loop with no decision cue ('we'll pick this up later: still need to run pass #3')
+    still surfaces in the recency tail, so /clear can't drop where we left off."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "office plants need weekly water"])
+    _insert_log(str(db), "/p", "We'll pick this up later: still need to run discovery pass three.")
+    capsys.readouterr()
+    main(["--db", str(db), "context", "-p", "/p"])
+    out = capsys.readouterr().out
+    assert "[RECENT" in out and "pass three" in out
+
+
+def test_open_task_cue_does_not_inflate_clear_nudge(tmp_path, capsys):
+    """The 'safe to clear?' nudge counts real decisions only — a pure open loop must NOT trip it,
+    or engrim would nag on ordinary work-in-progress."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed"])
+    _insert_log(str(db), "/p", "Still need to run pass three next; we'll pick this up later.")
+    capsys.readouterr()
+    main(["--db", str(db), "context", "-p", "/p"])
+    out = capsys.readouterr().out
+    # the nudge ("✎ … worth capturing before your next /clear") must be absent; the verdict is clear-safe
+    assert "safe to /clear" in out and "worth capturing" not in out
+
+
 # --- ambient status line: the user can SEE engrim working, out-of-band ---
 
 def test_statusline_ready_when_empty(tmp_path, capsys, monkeypatch):

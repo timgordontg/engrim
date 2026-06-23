@@ -620,20 +620,46 @@ def cmd_statusline(conn, a) -> None:
 
 _BOOT_SUMMARY_CAP = 200   # keep the pack lean: essay-length summaries are truncated in the boot pack
 
+# The designated session-resume cursor: the newest active record carrying this tag is pinned to the
+# TOP of the boot pack and shown UNTRUNCATED, so a fresh session after /clear opens on exactly where
+# we left off — continue-as-clear (#191 continuity, taken the last mile). It rides OUTSIDE the per-type
+# round-robin and isn't summary-capped; everything else fills the budget around it.
+_RESUME_TAG = "resume-pointer"
+
+
+def _is_resume(row):
+    """True if a record is the session-resume cursor (tagged _RESUME_TAG). Tolerant of malformed tags."""
+    try:
+        return _RESUME_TAG in json.loads(row["tags"] or "[]")
+    except Exception:
+        return False
+
 
 def _boot_pack(rows, budget):
     """Build the session-boot slice under a char budget, FAIRLY across types so a flood of one type
     (e.g. dozens of feedback records) can't starve recent decisions/facts. Returns [(row, summary)]
-    with long summaries truncated, plus the total char cost. Shared by `context` (display) and `stats`
-    (economics) so the reported cost is exactly the pack that loads."""
+    with long summaries truncated, plus the total char cost. The resume cursor (if any) is pinned
+    first and untruncated. Shared by `context` (display) and `stats` (economics) so the reported cost
+    is exactly the pack that loads."""
+    picked, used = [], 0
+    # Pin the resume cursor first, untruncated — the one record we never clip, since it IS the place to
+    # resume. Newest wins if several are tagged. It still counts against the budget; the rest fills around.
+    resume = [r for r in rows if _is_resume(r)]
+    cursor = max(resume, key=lambda r: r["ts"]) if resume else None
+    if cursor is not None:
+        csum = cursor["summary"] or ""
+        picked.append((cursor, csum))
+        used += len(csum) + 40
     by_type = {}
     for r in rows:
+        if cursor is not None and r["id"] == cursor["id"]:
+            continue                                           # already pinned; don't round-robin it again
         by_type.setdefault(r["type"], []).append(r)
     for t in by_type:
         by_type[t].sort(key=lambda r: r["ts"], reverse=True)   # recent-first within a type
     order = sorted(by_type, key=lambda t: _PRIO.get(t, 9))      # priority order across types
     idx = {t: 0 for t in order}
-    picked, used, progressed = [], 0, True
+    progressed = True
     while progressed:
         progressed = False
         for t in order:                                        # round-robin: one per type per round
@@ -721,14 +747,15 @@ def _recent_tail(conn, project, scan=_TAIL_SCAN, max_items=_TAIL_MAX_ITEMS, budg
     rows = conn.execute(
         "SELECT ts, content FROM log WHERE project = ? ORDER BY ts DESC LIMIT ?",
         (project, _UNCAPTURED_MAX_SCAN)).fetchall()
+    tail_cues = _DECISION_CUES + _OPENTASK_CUES   # continuity: surface open loops, not just decisions
     seen, out, used = set(), [], 0
     for i, r in enumerate(rows):
         if _past_floor(r, floor, i, scan):       # reached the last capture point / lean window
             break
         content = r["content"] or ""
-        if not any(cue in content.lower() for cue in _DECISION_CUES):
+        if not any(cue in content.lower() for cue in tail_cues):
             continue
-        snip = _decision_snippet(content)
+        snip = _decision_snippet(content, tail_cues)
         key = snip.lower()[:80]
         if not snip or key in seen or _looks_like_narration(snip):
             continue
@@ -794,15 +821,25 @@ def cmd_context(conn, a) -> None:
     if picked:
         print(f"🧠 engrim · memory restored for this project — you don't have to re-explain · {project}")
         print(f"  {len(picked)} of {len(rows)} curated records loaded (~{used} chars) · the rest one `recall` away")
-        picked.sort(key=lambda rs: _PRIO.get(rs[0]["type"], 9))     # group by type for display (recent-first kept)
-        cur = None
-        for r, summ in picked:
-            if r["type"] != cur:
-                cur = r["type"]
-                print(f"\n[{cur.upper()}]")
+
+        def _line(r, summ):
             tags = ", ".join(json.loads(r["tags"] or "[]"))
             gtag = "  · global" if r["project"] == GLOBAL_PROJECT else ""   # rides along in every project
             print(f"- #{r['id']} {summ}" + (f"  ({tags})" if tags else "") + gtag)
+
+        # The resume cursor leads, in its own section, so a fresh session reads "where we left off" first.
+        cursor = next(((r, s) for r, s in picked if _is_resume(r)), None)
+        rest = [(r, s) for r, s in picked if not _is_resume(r)]
+        if cursor is not None:
+            print("\n[▶ RESUME HERE]")
+            _line(*cursor)
+        rest.sort(key=lambda rs: _PRIO.get(rs[0]["type"], 9))      # group by type for display (recent-first kept)
+        cur = None
+        for r, summ in rest:
+            if r["type"] != cur:
+                cur = r["type"]
+                print(f"\n[{cur.upper()}]")
+            _line(r, summ)
         if len(picked) < len(rows):
             print(f"\n(+{len(rows) - len(picked)} more · `engrim recall -q ...` to pull on demand)")
     # Recency tail: what was just decided but isn't a curated record yet — so a cold boot doesn't lose
@@ -1464,6 +1501,20 @@ _DECISION_CUES = (
     "we are using", "let's do", "lets do", "agreed on", "final call",
 )
 
+# Open-loop / next-action cues — distinct from decisions. The recency TAIL honors these too, so a
+# mid-task /clear still surfaces where we left off ("pick this up later", "the next step is …",
+# "still need to …"). The 'safe to clear?' nudge (_uncaptured_count) deliberately does NOT use them:
+# it counts real decisions, not every open loop, or it would nag on ordinary work-in-progress. Phrase-
+# based (not bare "next"/"resume") to avoid false hits; agent process-chatter is still dropped by the
+# narration filter, which catches "next i'll", "then i'll", etc.
+_OPENTASK_CUES = (
+    "next step", "next action", "next we", "next up", "the next thing",
+    "pick up later", "pick this up", "pick it back up", "pick back up", "pick this back up",
+    "where we left off", "left off", "still need to", "to do next", "todo", "to-do",
+    "blocked on", "blocking on", "open loop", "remaining work", "we'll continue",
+    "continue from here", "resume here", "resume pointer", "we'll pick", "pick up where",
+)
+
 # The agent's OWN process/meta narration trips the cue list ("let me close the loop by
 # capturing…", "next I'll switch to the tests") — these are workflow chatter, not project
 # decisions, and they inflate the "to capture" nudge (#197). A snippet dominated by a marker
@@ -1507,11 +1558,12 @@ _DECISION_SEM_FLOOR = 0.45
 _CAPTURED_SIM = 0.45
 
 
-def _decision_snippet(text):
-    """Tighten a turn down to the sentence that carried the decision cue."""
+def _decision_snippet(text, cues=_DECISION_CUES):
+    """Tighten a turn down to the sentence that carried the cue (decisions by default; the recency
+    tail passes the wider decision+open-task set so it can quote the open loop it matched)."""
     flat = (text or "").replace("\n", " ")
     for s in re.split(r"(?<=[.!?])\s+", flat):
-        if any(cue in s.lower() for cue in _DECISION_CUES):
+        if any(cue in s.lower() for cue in cues):
             return s.strip()
     return flat.strip()
 
