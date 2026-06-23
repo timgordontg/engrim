@@ -18,7 +18,7 @@ STAMP="$DATA/.installed-source"
 
 # Pin the install source. Override with ENGRIM_PLUGIN_SOURCE to track a fork,
 # a branch, a local checkout (-e /path), or a future PyPI release ("engrim==X").
-SRC="${ENGRIM_PLUGIN_SOURCE:-git+https://github.com/timgordontg/engrim@v0.6.4}"
+SRC="${ENGRIM_PLUGIN_SOURCE:-git+https://github.com/timgordontg/engrim@v0.7.0}"
 # Split into argv so a multi-token override like "-e /path" reaches pip as two args, not one
 # (a single quoted "$SRC" would collapse them and fail). The default git URL is one token.
 read -r -a SRC_ARGS <<< "$SRC"
