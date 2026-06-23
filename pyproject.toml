@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engrim"
-version = "0.7.2"
+version = "0.8.0"
 description = "Project-scoped, cross-session memory for AI coding agents — hybrid keyword+semantic retrieval over a tagged SQLite store."
 readme = "README.md"
 requires-python = ">=3.10"
