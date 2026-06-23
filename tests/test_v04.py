@@ -115,6 +115,45 @@ def test_log_hook_reads_stdin(tmp_path, monkeypatch):
     assert c.execute("SELECT COUNT(*) FROM log WHERE project='/p'").fetchone()[0] == 2
 
 
+def test_log_hook_resolves_project_from_payload_not_process_cwd(tmp_path, monkeypatch):
+    """One Claude session is one transcript file; it must land in ONE project bucket even if the hook
+    process's cwd drifts (e.g. it inherits a cwd a tool subprocess chdir'd into). The Stop hook must
+    resolve the project from the workspace Claude Code reports in the payload, not os.getcwd() — else
+    the session forks across buckets, each with its own cursor, and the status line's count freezes."""
+    db = tmp_path / "m.db"
+    t = _transcript(tmp_path)
+    workspace = tmp_path / "the_session_project"; workspace.mkdir()
+    drifted = tmp_path / "some_other_repo"; drifted.mkdir()
+    monkeypatch.delenv("ENGRIM_PROJECT", raising=False)
+    monkeypatch.delenv("CLAUDE_PROJECT_TAG", raising=False)
+    monkeypatch.setattr("os.getcwd", lambda: str(drifted))          # hook process cwd has drifted away
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+        {"transcript_path": str(t), "session_id": "s", "cwd": str(workspace)})))
+    main(["--db", str(db), "log", "--hook"])                        # no -p: must auto-resolve
+    c = sqlite3.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM log WHERE project=?", (str(workspace),)).fetchone()[0] == 2
+    assert c.execute("SELECT COUNT(*) FROM log WHERE project=?", (str(drifted),)).fetchone()[0] == 0
+
+
+def test_log_ingest_cursor_advances_to_eof_and_is_stable(tmp_path):
+    """The byte-offset cursor advances to true EOF, and a re-run on the unchanged file holds there —
+    no re-reading old ground, no duplicate rows. (The monotonic guard additionally protects a
+    concurrent run from rewinding it; that path needs real concurrency and is covered by reasoning.)"""
+    db = tmp_path / "m.db"
+    t = _transcript(tmp_path)
+    okey = "log_offset:" + t.stem
+    main(["--db", str(db), "log", "--from-transcript", str(t), "-p", "/p"])
+    c = sqlite3.connect(db)
+    first = int(c.execute("SELECT value FROM engrim_meta WHERE project='/p' AND key=?", (okey,)).fetchone()[0])
+    assert first == t.stat().st_size                                # advanced to true EOF
+    c.close()
+    main(["--db", str(db), "log", "--from-transcript", str(t), "-p", "/p"])  # re-run, unchanged file
+    c = sqlite3.connect(db)
+    after = int(c.execute("SELECT value FROM engrim_meta WHERE project='/p' AND key=?", (okey,)).fetchone()[0])
+    assert after == first                                           # stable, not rewound
+    assert c.execute("SELECT COUNT(*) FROM log WHERE project='/p'").fetchone()[0] == 2  # no dupes
+
+
 def test_minder_injects_relevant_slice(tmp_path, capsys, monkeypatch):
     db = tmp_path / "m.db"
     main(["--db", str(db), "add", "-p", "/p", "-t", "decision", "-s", "chose postgres for billing integrity"])
