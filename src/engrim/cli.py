@@ -57,18 +57,43 @@ def _git_root(start: str):
         cur = parent
 
 
-def _resolve_project(p):
+def _resolve_project(p, cwd=None):
     """Project tag precedence: explicit -p  >  $ENGRIM_PROJECT  >  git root of cwd  >  cwd.
 
     $ENGRIM_PROJECT gives a stable tag across machines/containers (host path != container path);
-    git-root makes the tag the same no matter which subdirectory you launch from.
+    git-root makes the tag the same no matter which subdirectory you launch from. `cwd` overrides the
+    base directory (default: the process's): a hook should resolve against the workspace Claude Code
+    reports, not whatever cwd the hook process happens to inherit — see cmd_log's --hook path.
     """
     if p and p != "auto":
         return p
     env = os.environ.get("ENGRIM_PROJECT") or os.environ.get("CLAUDE_PROJECT_TAG")
     if env:
         return env
-    return _git_root(os.getcwd()) or os.getcwd()
+    base = cwd or os.getcwd()
+    return _git_root(base) or base
+
+
+def _payload_project(payload, explicit=None):
+    """Resolve the project for a hook / status line from its stdin payload, preferring the MOST STABLE
+    directory Claude Code offers so a session stays pinned to ONE project even if its cwd drifts during
+    the session (e.g. a tool subprocess chdir'd elsewhere):
+
+        -p  >  $ENGRIM_PROJECT  >  workspace.project_dir (the launch root — stable)  >
+        workspace.current_dir  >  cwd  >  the hook process's own cwd
+
+    project_dir is the directory Claude Code was started in and does not move; current_dir/cwd can.
+    Anchoring to it keeps the log's bucket, its byte cursor, and the status line's count all in
+    agreement for the whole session. Every entry point (status line, Stop hook, minder) routes through
+    here so they can never disagree on which project this session is."""
+    if explicit and explicit != "auto":
+        return explicit
+    env = os.environ.get("ENGRIM_PROJECT") or os.environ.get("CLAUDE_PROJECT_TAG")
+    if env:
+        return env
+    ws = (payload or {}).get("workspace") or {}
+    base = ws.get("project_dir") or ws.get("current_dir") or (payload or {}).get("cwd")
+    return _resolve_project(None, base)   # base may be None -> falls back to the process cwd; git-root applied
 
 
 def _csv(val):
@@ -501,14 +526,18 @@ def cmd_assist(conn, a) -> None:
     def emit(block):
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit", "additionalContext": block}}))
+    payload = {}
     try:
-        prompt = (json.load(sys.stdin) or {}).get("prompt") or ""
+        payload = json.load(sys.stdin) or {}
     except Exception:
         return emit("")
+    prompt = payload.get("prompt") or ""
     terms = _content_terms(prompt)
     if len(terms) < 2:               # too little signal to be worth any tokens
         return emit("")
-    project = _resolve_project(a.project)
+    # Same stable resolution as the status line + log hook, so the minder writes its "in play" marker
+    # under the project the bar actually reads — they never disagree about which project this session is.
+    project = _payload_project(payload, a.project)
     try:
         rows = _minder_rows(conn, project, " ".join(terms), prompt, a.k)
     except Exception:
@@ -541,19 +570,15 @@ def cmd_statusline(conn, a) -> None:
     or nagging a security-aware user. Reads Claude Code's session JSON on stdin (for the workspace dir),
     falls back to cwd. Fast + model-free: it only counts rows + reads meta, so it's safe to run on every
     status refresh."""
-    cwd = sess = None
+    data, sess = {}, None
     try:
         data = json.load(sys.stdin) or {}
-        cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd")
         sess = data.get("session_id") or data.get("sessionId")
     except Exception:
         pass
-    if cwd:
-        try:
-            os.chdir(cwd)
-        except Exception:
-            pass
-    project = _resolve_project(a.project)
+    # Resolve from the session's STABLE launch dir (project_dir), not whatever cwd the status-line
+    # process inherited — a drifted cwd would point the bar at a different project's memory mid-session.
+    project = _payload_project(data, a.project)
     try:
         n = conn.execute("SELECT COUNT(*) FROM memories WHERE project=? AND status='active'",
                          (project,)).fetchone()[0]
@@ -1359,6 +1384,15 @@ def _ingest_transcript(conn, project, path, session=None, include_thinking=False
                  o.get("type"), text, line, o.get("uuid")))
             added += cur.rowcount
         end = f.tell()
+    # Advance the cursor monotonically. When start==0 we deliberately re-read from the top (new
+    # session, or a rotated/truncated file detected above), so the freshly-read position is correct.
+    # Otherwise never rewind past where a concurrent run may already have advanced: two overlapping
+    # Stop hooks must not let a slower one reopen ground the faster one already covered.
+    if start:
+        try:
+            end = max(end, int(_meta_get(conn, project, okey) or 0))
+        except (TypeError, ValueError):
+            pass
     _meta_set(conn, project, okey, str(end))   # commits
     conn.commit()
     return added
@@ -1367,15 +1401,24 @@ def _ingest_transcript(conn, project, path, session=None, include_thinking=False
 def cmd_log(conn, a) -> None:
     """Append to the raw transcript log. `--hook` reads a Stop-hook JSON from stdin and ingests the
     session's new turns; `--from-transcript PATH` ingests a file; otherwise append one -r/-c turn."""
-    project = _resolve_project(a.project)
     if a.hook:
         try:
             payload = json.load(sys.stdin)
         except Exception:
             return
-        n = _ingest_transcript(conn, project, payload.get("transcript_path"),
-                               payload.get("session_id"), a.include_thinking)
+        # Resolve from the session's STABLE launch dir, not the hook process's os.getcwd(). A Stop
+        # hook can be spawned with an incidental cwd (e.g. it inherits one a tool subprocess chdir'd
+        # into), and a single Claude session is one transcript file with one session id. Keying
+        # ingestion off an unstable cwd splits that session across project buckets — each with its own
+        # byte-offset cursor — so turns after the drift land in the wrong project, the original
+        # cursor stalls, and the status line's per-(project,session) count freezes. Routing through
+        # _payload_project (project_dir-first) keeps the whole session in one bucket and, because the
+        # status line resolves the same way, keeps the bucket and the displayed count in agreement.
+        project = _payload_project(payload, a.project)
+        _ingest_transcript(conn, project, payload.get("transcript_path"),
+                           payload.get("session_id"), a.include_thinking)
         return  # silent: this runs from a hook
+    project = _resolve_project(a.project)
     if a.from_transcript:
         n = _ingest_transcript(conn, project, a.from_transcript, a.session, a.include_thinking)
         print(f"logged {n} new turn(s) from transcript -> project={project}")
