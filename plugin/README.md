@@ -40,7 +40,7 @@ The plugin respects all of engrim's [environment variables](https://github.com/t
 
 | Var | Default | Purpose |
 |---|---|---|
-| `ENGRIM_PLUGIN_SOURCE` | `git+https://github.com/timgordontg/engrim@v0.7.0` | What the bootstrap installs. Point it at a fork, a branch, `-e /local/path`, or a future PyPI release. |
+| `ENGRIM_PLUGIN_SOURCE` | `engrim==0.7.1` | What the bootstrap installs (the published PyPI wheel). Point it at a fork, a branch, `-e /local/path`, or a git ref. |
 
 The full project store, the status line, and all commands work exactly as in the
 [main README](https://github.com/timgordontg/engrim). This plugin is just the
