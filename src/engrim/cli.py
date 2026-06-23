@@ -640,15 +640,66 @@ _TAIL_MAX_ITEMS = 3        # hard cap on tail lines — recency hint, not a tran
 _TAIL_BUDGET = 600         # own char sub-budget, independent of the curated boot budget
 _TAIL_SNIPPET_CAP = 180    # per-line truncation
 
+# Capture-floor: how far back the AUTOMATIC recency net looks. A bare last-N-turns window silently
+# loses a decision when a long tail of verification/chatter — or a hard session kill mid-capture —
+# pushes it past N before the next boot. So rather than a fixed turn count, scan back to the
+# project's newest curated record: every decision-signal turn logged SINCE the last `add` stays
+# eligible to resurface until it is itself captured. A hard ceiling keeps the scan cheap and
+# model-free on every status refresh; before anything is curated, callers fall back to their count
+# window so a fresh project stays lean.
+_UNCAPTURED_MAX_SCAN = 200
+
+
+def _parse_ts(s):
+    """ISO-8601 timestamp -> aware datetime (None if unparseable). Log turns are stamped 'Z' (UTC)
+    while curated records carry a local offset; normalizing 'Z' lets the net compare a turn against
+    the last capture as instants, not mismatched strings."""
+    try:
+        d = _dt.datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return d if d.tzinfo else d.astimezone()   # a naive stamp -> assume local, so comparisons stay aware-safe
+
+
+def _capture_floor(conn, project):
+    """Instant of the project's newest curated record — the 'caught up to here' mark the recency net
+    scans back to. None if nothing is curated yet. Project-scoped: a global record isn't a capture of
+    THIS project's decisions."""
+    try:
+        row = conn.execute(
+            "SELECT MAX(ts) FROM memories WHERE project = ? AND status = 'active'", (project,)).fetchone()
+    except Exception:
+        return None
+    return _parse_ts(row[0]) if row and row[0] else None
+
+
+def _past_floor(r, floor, i, scan):
+    """Stop condition for a recency scan iterating log rows newest-first. Hybrid window: always scan
+    the lean recent `scan` turns, AND extend back to the capture floor — stop only once a turn is
+    BOTH outside the recent window and older than the last capture. The recent window protects a
+    just-made decision even when a later unrelated `add` moved the floor past it; the floor extends
+    reach for a decision buried under a long tail of chatter (or a mid-capture session kill)."""
+    if i < scan:
+        return False                       # always scan the lean recent window
+    if floor is None:
+        return True                        # past the window, nothing curated to extend reach
+    rts = _parse_ts(r["ts"])
+    # strict `<`: a turn in the floor's own second (record ts is second-precision) is still scanned,
+    # biasing toward surfacing; the captured-check dedups any that were genuinely captured.
+    return rts is None or rts < floor      # past window AND before the last capture -> stop
+
 
 def _recent_tail(conn, project, scan=_TAIL_SCAN, max_items=_TAIL_MAX_ITEMS, budget=_TAIL_BUDGET):
     """Recent uncaptured decision-signal turns from the log, newest-first, under a hard item + char cap.
     Reuses review's detector; dedups against curated memory lexically so the boot stays fast."""
+    floor = _capture_floor(conn, project)
     rows = conn.execute(
         "SELECT ts, content FROM log WHERE project = ? ORDER BY ts DESC LIMIT ?",
-        (project, scan)).fetchall()
+        (project, _UNCAPTURED_MAX_SCAN)).fetchall()
     seen, out, used = set(), [], 0
-    for r in rows:
+    for i, r in enumerate(rows):
+        if _past_floor(r, floor, i, scan):       # reached the last capture point / lean window
+            break
         content = r["content"] or ""
         if not any(cue in content.lower() for cue in _DECISION_CUES):
             continue
@@ -676,12 +727,15 @@ def _uncaptured_count(conn, project, scan=25, cap=9):
     the same 'safe to clear?' signal `review` reports, kept light enough for the ambient status bar (a
     small bounded log scan + lexical capture-check, no embedder). Powers the live 'N to capture' nudge."""
     try:
-        rows = conn.execute("SELECT content FROM log WHERE project=? ORDER BY ts DESC LIMIT ?",
-                            (project, scan)).fetchall()
+        floor = _capture_floor(conn, project)
+        rows = conn.execute("SELECT ts, content FROM log WHERE project=? ORDER BY ts DESC LIMIT ?",
+                            (project, _UNCAPTURED_MAX_SCAN)).fetchall()
     except Exception:
         return 0
     seen, n = set(), 0
-    for r in rows:
+    for i, r in enumerate(rows):
+        if _past_floor(r, floor, i, scan):       # reached the last capture point / lean window
+            break
         content = r["content"] or ""
         if not any(cue in content.lower() for cue in _DECISION_CUES):
             continue
