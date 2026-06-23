@@ -380,6 +380,11 @@ def _resolve_embedder():
         _EMBEDDER = (None, None)
         return _EMBEDDER
     try:
+        # huggingface_hub's snapshot_download prints a "Fetching N files" tqdm bar to STDERR on
+        # first model fetch. Any caller capturing 2>&1 (the SessionStart hook, agent tooling) gets
+        # that noise injected into context. Disable HF progress bars before model2vec imports the
+        # hub. setdefault so an explicit override from the environment still wins.
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         from model2vec import StaticModel
         model_id = os.environ.get("ENGRIM_EMBED_MODEL", "minishlab/potion-base-8M")
         model = StaticModel.from_pretrained(model_id)
