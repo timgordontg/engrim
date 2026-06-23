@@ -213,6 +213,32 @@ def _meta_set(conn, project, key, value):
     conn.commit()
 
 
+def add_memory(conn, *, project, type, summary, detail=None, status="active",
+               tags=None, links=None, source=None) -> int:
+    """Insert one memory record and best-effort auto-embed it; return the new id.
+
+    The shared write core behind both the `add` CLI command and the MCP server, so a
+    record created either way is identical and immediately searchable by meaning.
+    `tags`/`links` are lists (already normalized by the caller)."""
+    cur = conn.execute(
+        "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (_now(), project, type, summary, detail, status,
+         json.dumps(tags or []), json.dumps(links or []), source),
+    )
+    conn.commit()
+    # Auto-embed so the record is searchable by meaning immediately — no manual `engrim embed` step.
+    # Best-effort: a missing/slow/broken backend must never fail or slow down a write.
+    fn, name = _resolve_embedder()
+    if fn:
+        try:
+            _embed_row(conn, cur.lastrowid, summary, detail, fn, name)
+            conn.commit()
+        except Exception:
+            pass
+    return cur.lastrowid
+
+
 def cmd_add(conn, a) -> None:
     if a.type not in TYPES:
         sys.exit(f"--type must be one of {TYPES}")
@@ -220,24 +246,11 @@ def cmd_add(conn, a) -> None:
         sys.exit("--summary cannot be empty")
     # --global writes to the user-layer that loads in every project; otherwise scope to the cwd's project.
     project = GLOBAL_PROJECT if getattr(a, "globl", False) else _resolve_project(a.project)
-    cur = conn.execute(
-        "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
-        (_now(), project, a.type, a.summary, a.detail, a.status,
-         json.dumps(_csv(a.tags)), json.dumps(_csv(a.links)), a.source),
-    )
-    conn.commit()
+    new_id = add_memory(conn, project=project, type=a.type, summary=a.summary,
+                        detail=a.detail, status=a.status,
+                        tags=_csv(a.tags), links=_csv(a.links), source=a.source)
     shown = "global · loads in every project" if project == GLOBAL_PROJECT else project
-    print(f"+ #{cur.lastrowid} [{a.type}] {shown}\n  {a.summary}")
-    # Auto-embed so the record is searchable by meaning immediately — no manual `engrim embed` step.
-    # Best-effort: a missing/slow/broken backend must never fail or slow down a write.
-    fn, name = _resolve_embedder()
-    if fn:
-        try:
-            _embed_row(conn, cur.lastrowid, a.summary, a.detail, fn, name)
-            conn.commit()
-        except Exception:
-            pass
+    print(f"+ #{new_id} [{a.type}] {shown}\n  {a.summary}")
 
 
 def _row_line(r, detail: bool) -> str:
@@ -1690,7 +1703,16 @@ def build_parser() -> argparse.ArgumentParser:
     pst.add_argument("-p", "--project", default="auto")
     pst.add_argument("-b", "--budget", type=int, default=4000)
     pst.set_defaults(func=cmd_stats)
+
+    pmcp = sub.add_parser("mcp", help="run engrim as an MCP server (stdio) for clients like Claude Code")
+    pmcp.set_defaults(func=cmd_mcp)
     return p
+
+
+def cmd_mcp(conn, a) -> None:
+    """Run engrim as an MCP server over stdio (for MCP clients like Claude Code)."""
+    from engrim.mcp_server import serve
+    serve(conn)
 
 
 def main(argv=None) -> None:

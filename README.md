@@ -284,9 +284,32 @@ volume. (Avoid a single store over a network filesystem like NFS.)
 | `engrim logs [-q "..."]` | browse/search the transcript log (kept out of the boot pack) |
 | `engrim supersede --id N` | mark a record `superseded`/`done` |
 | `engrim list` · `projects` · `stats` | browse and summarize (stats reports context economics) |
+| `engrim mcp` | run engrim as an [MCP server](#use-it-as-an-mcp-server) (stdio) for any MCP client |
 
 Record types: `decision`, `fact`, `feedback`, `state`, `user`, `reference`. Stale records are
 `supersede`d rather than deleted, so history stays honest.
+
+## Use it as an MCP server
+
+Prefer wiring engrim in over the [Model Context Protocol](https://modelcontextprotocol.io)? It ships
+a server too — no extra dependency, just the stdio transport (newline-delimited JSON-RPC) over
+engrim's zero-dep core:
+
+```bash
+claude mcp add engrim -- engrim mcp        # Claude Code
+```
+
+…or point any MCP client at the `engrim mcp` command. It exposes three tools backed by the exact
+recall / boot-pack / write logic the CLI uses:
+
+| tool | does |
+|---|---|
+| `engrim_recall` | hybrid keyword + semantic search over the project's records |
+| `engrim_context` | the curated, budget-capped session-boot pack |
+| `engrim_add` | write a durable record (`decision`/`fact`/`feedback`/`state`/`user`/`reference`) |
+
+Project scope is the client's working directory by default (`"auto"`), same as the CLI. The hook
+loop and the MCP server are two front doors to one store — use either, or both.
 
 ## Security & privacy
 
