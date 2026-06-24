@@ -42,14 +42,25 @@ def _now() -> str:
     return _dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-_PROJECT_MARKERS = (".git", ".hg", ".svn")
+# A project root is a dir holding a VCS dir OR a `.claude` project dir. `.claude` matters because
+# not every project is a git repo (e.g. a data/ops workspace) — without a marker the tag would fall
+# back to the raw cwd, so launching from a subdir silently files records under a SIBLING scope the
+# status line and boot pack never read (records land, counter never moves: "is it even logging?").
+_PROJECT_MARKERS = (".git", ".hg", ".svn", ".claude")
 
 
 def _git_root(start: str):
-    """Walk up from `start` to the nearest repo root (.git/.hg/.svn). None if not in a repo."""
+    """Walk up from `start` to the nearest project root (a dir with a _PROJECT_MARKER). None if none.
+
+    $HOME is NEVER treated as a project root: `~/.claude` (and a stray `~/.git`) exist for almost
+    everyone, so anchoring there would collapse every non-repo project under home into ONE bucket —
+    worse than the no-marker fallback. We skip the marker check AT home but keep walking past it, so a
+    real repo above home (unusual) still resolves while `~/.claude` can't become a catch-all anchor."""
+    home = os.path.realpath(os.path.expanduser("~"))
     cur = os.path.abspath(start)
     while True:
-        if any(os.path.exists(os.path.join(cur, m)) for m in _PROJECT_MARKERS):
+        if os.path.realpath(cur) != home and \
+                any(os.path.exists(os.path.join(cur, m)) for m in _PROJECT_MARKERS):
             return cur
         parent = os.path.dirname(cur)
         if parent == cur:
@@ -61,7 +72,8 @@ def _resolve_project(p, cwd=None):
     """Project tag precedence: explicit -p  >  $ENGRIM_PROJECT  >  git root of cwd  >  cwd.
 
     $ENGRIM_PROJECT gives a stable tag across machines/containers (host path != container path);
-    git-root makes the tag the same no matter which subdirectory you launch from. `cwd` overrides the
+    project-root (a .git/.hg/.svn repo OR a .claude dir) makes the tag the same no matter which
+    subdirectory you launch from — non-repo workspaces anchor on .claude. `cwd` overrides the
     base directory (default: the process's): a hook should resolve against the workspace Claude Code
     reports, not whatever cwd the hook process happens to inherit — see cmd_log's --hook path.
     """

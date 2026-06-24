@@ -7,14 +7,14 @@
   },
   "metadata": {
     "description": "Local-first memory for Claude Code — no API key, nothing leaves your machine.",
-    "version": "0.6.6"
+    "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "engrim",
       "source": "./plugin",
       "description": "Local-first memory for Claude Code — no API key, nothing leaves your machine. Remembers your decisions and the WHY behind them, then hands back just the relevant slice at session start and on every prompt, so you can /clear aggressively without losing context. You curate what matters; bundled semantic + keyword retrieval over a local SQLite store. Self-installs on first run.",
-      "version": "0.6.6",
+      "version": "1.0.0",
       "keywords": ["memory", "context", "local-first", "no-api-key", "privacy", "decisions", "clear", "continuity"]
     }
   ]

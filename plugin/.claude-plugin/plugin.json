@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "engrim",
   "displayName": "engrim",
-  "version": "0.7.1",
+  "version": "1.0.0",
   "description": "Local-first memory for Claude Code — no API key, nothing leaves your machine. Remembers your decisions and the WHY behind them, then hands back just the relevant slice at session start and on every prompt, so you can /clear aggressively without losing context. You curate what matters; bundled semantic + keyword retrieval over a local SQLite store. Self-installs on first run.",
   "author": { "name": "Tim Gordon", "url": "https://github.com/timgordontg" },
   "homepage": "https://github.com/timgordontg/engrim",

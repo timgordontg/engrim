@@ -121,6 +121,64 @@ def test_git_root_tagging_from_subdir(tmp_path, monkeypatch):
     assert os.path.realpath(proj) == os.path.realpath(str(repo))
 
 
+def test_claude_dir_anchors_non_git_workspace(tmp_path, monkeypatch):
+    """A non-repo workspace (no .git) marked by a .claude dir anchors from any subdir to that root.
+
+    This is the edge case that bit in the field: launching from `proj/backend` filed records under
+    the `proj/backend` SIBLING scope while the status line read `proj` — so the count never moved and
+    logging *looked* dead though writes were landing. A .claude dir makes the non-repo root anchor."""
+    import os
+    proj = tmp_path / "workspace"
+    (proj / ".claude").mkdir(parents=True)            # no .git here — pure Claude Code workspace
+    sub = proj / "backend" / "discovery"
+    sub.mkdir(parents=True)
+    db = tmp_path / "m.db"
+    monkeypatch.delenv("ENGRIM_PROJECT", raising=False)
+    monkeypatch.delenv("CLAUDE_PROJECT_TAG", raising=False)
+    monkeypatch.chdir(sub)
+    main(["--db", str(db), "add", "-t", "fact", "-s", "anchored at workspace root"])  # -p auto
+    proj_tag = sqlite3.connect(db).execute("SELECT project FROM memories").fetchone()[0]
+    assert os.path.realpath(proj_tag) == os.path.realpath(str(proj))
+
+
+def test_git_wins_over_nested_claude_marker(tmp_path, monkeypatch):
+    """Nearest marker wins: a .git repo root anchors even if an ancestor also has a .claude dir."""
+    import os
+    outer = tmp_path / "outer"
+    (outer / ".claude").mkdir(parents=True)
+    repo = outer / "repo"
+    (repo / ".git").mkdir(parents=True)
+    sub = repo / "src"
+    sub.mkdir(parents=True)
+    db = tmp_path / "m.db"
+    monkeypatch.delenv("ENGRIM_PROJECT", raising=False)
+    monkeypatch.delenv("CLAUDE_PROJECT_TAG", raising=False)
+    monkeypatch.chdir(sub)
+    main(["--db", str(db), "add", "-t", "fact", "-s", "nearest root wins"])  # -p auto
+    proj_tag = sqlite3.connect(db).execute("SELECT project FROM memories").fetchone()[0]
+    assert os.path.realpath(proj_tag) == os.path.realpath(str(repo))
+
+
+def test_home_claude_never_becomes_catch_all_anchor(tmp_path, monkeypatch):
+    """`~/.claude` must NOT anchor: a non-repo dir under a HOME that has ~/.claude tags to the cwd
+    itself, not to HOME — otherwise every loose project under home collapses into one bucket."""
+    import os
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)            # the global ~/.claude
+    loose = home / "loose_project"                    # a project with no marker of its own
+    loose.mkdir()
+    db = tmp_path / "m.db"
+    monkeypatch.delenv("ENGRIM_PROJECT", raising=False)
+    monkeypatch.delenv("CLAUDE_PROJECT_TAG", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~", str(home)) if p.startswith("~") else p)
+    monkeypatch.chdir(loose)
+    main(["--db", str(db), "add", "-t", "fact", "-s", "must not collapse to home"])  # -p auto
+    proj_tag = sqlite3.connect(db).execute("SELECT project FROM memories").fetchone()[0]
+    assert os.path.realpath(proj_tag) == os.path.realpath(str(loose))
+    assert os.path.realpath(proj_tag) != os.path.realpath(str(home))
+
+
 def test_env_project_override(tmp_path, monkeypatch):
     """$ENGRIM_PROJECT gives a stable tag (for sharing across host + containers)."""
     db = tmp_path / "m.db"
