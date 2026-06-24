@@ -176,6 +176,37 @@ def test_minder_silent_on_trivial_prompt(tmp_path, capsys, monkeypatch):
     assert ctx == ""  # gated: too few substantive terms -> spend nothing
 
 
+def test_minder_nudges_curation_when_backlog_builds(tmp_path, capsys, monkeypatch):
+    """Mid-session backstop: once uncaptured decisions cross the floor, the minder appends an auto-curate
+    directive to the AGENT — even when no memory slice is relevant to the prompt (so it never gets lost)."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed to init schema"])
+    for d in ["We decided to use Kafka for the billing pipeline.",
+              "We chose Postgres as the system of record.",
+              "We settled on gRPC between the new services.",
+              "We agreed on dropping the legacy cron scheduler."]:
+        _insert_log(str(db), "/p", d)
+    capsys.readouterr()
+    monkeypatch.setattr("sys.stdin",
+                        io.StringIO(json.dumps({"prompt": "unrelated question about the weather forecast"})))
+    main(["--db", str(db), "assist", "-p", "/p"])
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "auto-curate" in ctx and "engrim add" in ctx
+
+
+def test_minder_no_curation_nudge_below_floor(tmp_path, capsys, monkeypatch):
+    """A small backlog (under the floor) must NOT trip the curation nudge — no nagging on ordinary work."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed to init schema"])
+    _insert_log(str(db), "/p", "We decided to use Kafka for the billing pipeline.")
+    capsys.readouterr()
+    monkeypatch.setattr("sys.stdin",
+                        io.StringIO(json.dumps({"prompt": "unrelated question about the weather forecast"})))
+    main(["--db", str(db), "assist", "-p", "/p"])
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "auto-curate" not in ctx
+
+
 def test_sessionstart_recovers_orphaned_transcript(tmp_path, capsys, monkeypatch):
     """A crash/hard-close skips Stop+SessionEnd; the next SessionStart must sweep up the lost tail."""
     db = tmp_path / "m.db"
@@ -378,6 +409,51 @@ def test_context_recent_tail_dedupes_captured_decision(tmp_path, capsys):
     out = capsys.readouterr().out
     # the only decision candidate is already curated -> tail is empty -> no RECENT section (no dup noise)
     assert "[RECENT" not in out
+
+
+# --- auto-curate on boot: recover a session that closed (window/limit) before curating ---
+
+def test_hook_emits_autocurate_directive_for_uncaptured_decision(tmp_path, capsys):
+    """A hard window-close/limit-expiry can't curate itself, but the raw log survives. The NEXT
+    session's `engrim hook` injects an AUTO-CURATE directive telling the agent to promote the
+    uncaptured decisions — zero user interaction. Manual `context` keeps the human-facing nudge."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "office plants need weekly water"])
+    _insert_log(str(db), "/p", "We decided to migrate the billing service to Kafka for throughput.")
+    capsys.readouterr()
+    main(["--db", str(db), "hook", "--no-sync", "-p", "/p"])
+    boot = json.loads(capsys.readouterr().out.strip())["hookSpecificOutput"]["additionalContext"]
+    assert "AUTO-CURATE" in boot and "engrim review" in boot
+    # the manual `context` path must NOT emit the agent directive — it keeps the gentle human nudge
+    capsys.readouterr()
+    main(["--db", str(db), "context", "-p", "/p"])
+    manual = capsys.readouterr().out
+    assert "AUTO-CURATE" not in manual and "worth capturing" in manual
+
+
+def test_hook_no_autocurate_directive_when_captured(tmp_path, capsys):
+    """Self-limiting + dedup-safe: once the decision is curated, the boot directive stops firing,
+    so repeated session boots don't loop on already-captured work."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "decision",
+          "-s", "migrate the billing service to Kafka for throughput"])
+    _insert_log(str(db), "/p", "We decided to migrate the billing service to Kafka for throughput.")
+    capsys.readouterr()
+    main(["--db", str(db), "hook", "--no-sync", "-p", "/p"])
+    boot = json.loads(capsys.readouterr().out.strip())["hookSpecificOutput"]["additionalContext"]
+    assert "AUTO-CURATE" not in boot
+
+
+def test_hook_no_autocurate_directive_for_pure_open_task(tmp_path, capsys):
+    """A pure open-loop (continuity cue, no decision) must NOT trip the directive — it surfaces in the
+    recency tail for continuity, but engrim won't tell the agent to curate ordinary work-in-progress."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed"])
+    _insert_log(str(db), "/p", "Still need to run pass three next; we'll pick this up later.")
+    capsys.readouterr()
+    main(["--db", str(db), "hook", "--no-sync", "-p", "/p"])
+    boot = json.loads(capsys.readouterr().out.strip())["hookSpecificOutput"]["additionalContext"]
+    assert "AUTO-CURATE" not in boot
 
 
 # --- continue-as-clear: the pinned resume cursor + open-task continuity tail ---

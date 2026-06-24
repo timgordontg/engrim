@@ -162,9 +162,17 @@ not a replayed transcript):
   is…"*, *"still need to…"* — so a mid-task clear can't drop your place. It's hard-capped (a few
   lines, its own tiny budget) so it never bloats context, and the *"safe to clear?"* nudge stays
   decision-only so it won't nag on ordinary work-in-progress.
+- **Auto-curation on the next boot.** A hard close — a window closing, or a session-limit expiry —
+  can't curate itself: no hook fires reliably on a kill. But the raw log already survived it (every
+  turn is logged as you work, and any orphaned tail is swept up at the next start). So the next
+  session's agent is handed a short directive to promote the durable uncaptured decisions into
+  curated memory *automatically* — no prompt from you. It's judgment-applied (the agent skips
+  chatter, reversed calls, and false-positives, keeping the store high-signal), decision-gated, and
+  self-limiting: the moment a decision is captured it stops resurfacing. A long session that builds a
+  backlog gets the same nudge mid-stream, so you don't have to wait for the next boot.
 
-Net effect: `/clear` aggressively and reopen oriented on *what you were doing*, not just what you
-decided.
+Net effect: `/clear` aggressively — and even lose a session to a limit or a closed window — and
+reopen oriented on *what you were doing*, not just what you decided.
 
 ## "Isn't this just markdown notes / CLAUDE.md?"
 
@@ -385,9 +393,12 @@ engrim is small and opinionated on purpose. Known edges, stated plainly:
 
 - **It remembers what gets *recorded*, not everything you say.** This is the most important one.
   Curated memory holds what you (or the agent) `add`; the boot pack and the minder only surface
-  *that*. If a decision is discussed but never recorded before the session closes, it isn't in
-  curated memory — capture matters. (The transcript `log` keeps the raw back-and-forth, but it's a
-  flight recorder you query deliberately, not what the minder reasons over.)
+  *that*. If a decision is discussed but never recorded, it isn't in curated memory — capture
+  matters. (The transcript `log` keeps the raw back-and-forth, but it's a flight recorder you query
+  deliberately, not what the minder reasons over.) There *is* an automatic backstop — the next
+  session's agent is nudged to promote uncaptured decisions out of the raw log (see
+  [Auto-curation](#continue-as-clear-pick-up-exactly-where-you-left-off)) — but it's a heuristic,
+  agent-applied safety net, not a guarantee. Capture is still the contract.
 - **Retrieval, not comprehension.** The minder ranks records by relevance to your prompt — fast and
   good, but it doesn't *understand* them. Hybrid ranking can still over-weight a stray keyword match
   on very abstract queries; rerank and adaptive fusion are on the [roadmap](ROADMAP.md).

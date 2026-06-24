@@ -564,15 +564,30 @@ def cmd_assist(conn, a) -> None:
             break
         out.append(line)
         used += len(line) + 1
-    if not out:
-        return emit("")                                       # nothing relevant -> spend nothing
-    try:    # record the pull so the ambient status line can show "N in play" — out-of-band, never in chat
-        _meta_set(conn, project, "minder_n", str(len(out)))
-        _meta_set(conn, project, "minder_ts", _now())
+    # Mid-session auto-curate backstop: if a real backlog of uncaptured decisions has built up inside a
+    # long session, nudge the AGENT — not the user — to promote the durable ones now (the boot directive
+    # only fires at the NEXT session). Conservative: gated on a backlog floor so ordinary work doesn't
+    # trip it; decision-only + dedup-safe, so it self-clears the moment they're captured. Cheap, model-free.
+    directive = ""
+    try:
+        unc = _uncaptured_count(conn, project)
+        if unc >= _ASSIST_CURATE_FLOOR:
+            directive = (f"\n[engrim · auto-curate] {unc} decisions are logged but not yet in curated "
+                         "memory. Before your next reply, SILENTLY `engrim add` the durable ones "
+                         "(skip chatter, reversed calls, and false-positives); don't announce it.")
     except Exception:
-        pass
-    emit("Possibly-relevant project memory (engrim), pulled for this message — use if helpful:\n"
-         + "\n".join(out))
+        directive = ""
+    if not out and not directive:
+        return emit("")                                       # nothing relevant -> spend nothing
+    if out:
+        try:  # record the pull so the ambient status line can show "N in play" — out-of-band, never in chat
+            _meta_set(conn, project, "minder_n", str(len(out)))
+            _meta_set(conn, project, "minder_ts", _now())
+        except Exception:
+            pass
+    head = ("Possibly-relevant project memory (engrim), pulled for this message — use if helpful:\n"
+            + "\n".join(out)) if out else ""
+    emit((head + directive).strip())
 
 
 def cmd_statusline(conn, a) -> None:
@@ -711,6 +726,11 @@ _TAIL_SNIPPET_CAP = 180    # per-line truncation
 # model-free on every status refresh; before anything is curated, callers fall back to their count
 # window so a fresh project stays lean.
 _UNCAPTURED_MAX_SCAN = 200
+
+# Mid-session auto-curate backstop: the boot directive only fires at the NEXT session, so a single long
+# session can accumulate uncaptured decisions. Once the backlog crosses this floor the minder nudges the
+# AGENT (not the user) to promote them. Set high enough that ordinary work-in-progress never trips it.
+_ASSIST_CURATE_FLOOR = 4
 
 
 def _parse_ts(s):
@@ -863,9 +883,28 @@ def cmd_context(conn, a) -> None:
     # Clear-readiness verdict — the same gentle signal as the status bar, so the summary answers
     # "safe to /clear?" too. Capturing is a normal part of working, so this is an invitation (✎),
     # never a warning. Only shown once there's session history to reason about.
+    #
+    # At BOOT (agent_directive, set by `engrim hook`) this flips from a passive nudge-to-the-human into
+    # an active directive-to-the-AGENT: a window-close / session-limit expiry can't curate itself (no
+    # hook fires reliably at a hard kill), so the *next* session's agent is the recovery path. The raw
+    # log already survived the close (Stop hook every turn + boot transcript reconciliation, #101); this
+    # directive tells the fresh agent to promote the durable survivors into curated memory before it does
+    # anything else — zero user interaction, judgment applied (so #219-type false-positives are skipped),
+    # dedup-safe (the detector drops anything already curated). Self-healing: the capture-floor keeps a
+    # survivor eligible across boots until it is actually captured.
     if conn.execute("SELECT 1 FROM log WHERE project = ? LIMIT 1", (project,)).fetchone():
         unc = _uncaptured_count(conn, project)
-        if unc:
+        if getattr(a, "agent_directive", False):
+            if unc:   # cheap decision-only gate; the agent's `engrim review` does the thorough semantic pass
+                print("\n[⟳ AUTO-CURATE — a prior session left decisions in the raw log but NOT in curated "
+                      "memory (a window-close/limit-expiry can't curate itself). You are the recovery path.]")
+                print("Before you address the user's message, SILENTLY curate the durable survivors:")
+                print("  1. `engrim review`  → the full uncaptured-decision list (heuristic candidates)")
+                print("  2. for each GENUINELY durable one:  "
+                      "engrim add -t <decision|fact|state|feedback> -s \"<one line>\" [-d \"<why>\"]")
+                print("  Skip chatter, reversed calls, and product copy (known false-positives) — keep the "
+                      "store high-signal. Don't announce this; just curate, then proceed.")
+        elif unc:
             print(f"\n✎ {unc} recent decision(s) not yet curated — worth capturing before your next "
                   "/clear:  engrim add -t decision -s \"…\"")
         else:
@@ -898,6 +937,7 @@ def cmd_hook(conn, a) -> None:
         except Exception:
             pass
     a.json = False
+    a.agent_directive = True   # boot path: emit the auto-curate directive (recovery for a hard window-close)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cmd_context(conn, a)
