@@ -355,6 +355,36 @@ def _recall_rows(conn, project, query, k, type_=None, include_stale=False):
     return conn.execute(sql, params).fetchall()
 
 
+def _log_search(conn, project, query, k):
+    """Search the transcript log — the 128 MB of history that `recall` never touches.
+
+    Deliberately OPT-IN (`recall --log`). The two-tier split (#98) is that the log never AUTO-loads
+    into context; asking for it explicitly doesn't violate that, it's the payoff for having kept it.
+    Plain scan, no FTS table: log.content is ~5 MB against 128 MB of raw, and a full scan measures at
+    ~21 ms over 44k rows — not worth an index, a migration, or the write amplification."""
+    terms = [t for t in _content_terms(query or "")] or [(query or "").strip().lower()]
+    terms = [t for t in terms if t]
+    if not terms:
+        return []
+    like = " AND ".join(["LOWER(content) LIKE ?"] * len(terms))
+    rows = conn.execute(
+        "SELECT ts, role, content FROM log WHERE project = ? AND content IS NOT NULL AND content != '' "
+        "AND " + like + " ORDER BY ts DESC LIMIT ?",
+        (project, *[f"%{t}%" for t in terms], k)).fetchall()
+    return rows
+
+
+def _log_hit_line(row, query):
+    """One result line: the matching slice of the turn, not the whole turn."""
+    content = " ".join((row["content"] or "").split())
+    terms = [t for t in _content_terms(query or "") if t]
+    low = content.lower()
+    at = min([low.find(t) for t in terms if low.find(t) >= 0] or [0])
+    start = max(0, at - 60)
+    snip = ("…" if start else "") + content[start:start + 180] + ("…" if len(content) > start + 180 else "")
+    return f"  · [{row['ts'][:16]}] {row['role']:<9} {snip}"
+
+
 def cmd_recall(conn, a) -> None:
     project = _resolve_project(a.project)
     # Hybrid (bm25 + semantic) for a real free-text query — same fusion the minder uses, so a manual
@@ -370,14 +400,24 @@ def cmd_recall(conn, a) -> None:
         clean = [{k: v for k, v in dict(r).items() if k not in ("rank", "_vec")} for r in rows]
         print(json.dumps(clean, default=str))
         return
-    if not rows:
+    if not rows and not getattr(a, "log", False):
         print(f"(no memories for project={project}"
               + (f" matching {a.query!r}" if a.query else "") + ")")
         return
-    print(f"== {len(rows)} memr(s) · project={project}"
-          + (f" · q={a.query!r}" if a.query else "") + " ==")
-    for r in rows:
-        print(_row_line(r, a.detail))
+    if rows:
+        print(f"== {len(rows)} memr(s) · project={project}"
+              + (f" · q={a.query!r}" if a.query else "") + " ==")
+        for r in rows:
+            print(_row_line(r, a.detail))
+    if getattr(a, "log", False):
+        hits = _log_search(conn, project, a.query, a.k)
+        print(f"\n== log · {len(hits)} turn(s)"
+              + (f" matching {a.query!r}" if a.query else "") + " ==")
+        if not hits:
+            print("  (nothing in the transcript log — it holds prose plus one line per "
+                  "state-changing action)")
+        for r in hits:
+            print(_log_hit_line(r, a.query))
 
 
 def cmd_list(conn, a) -> None:
@@ -1455,12 +1495,60 @@ def cmd_sync(conn, a) -> None:
 # it can't bloat a session or drag the system. Curated memory (small, loaded) and the transcript
 # log (complete, never loaded) are two tiers that don't compete.
 
+# --- action lines: the WORK, not just the talk ---------------------------------------------------
+#
+# The log used to keep prose only ("the actual conversation, not machinery"), which left it too
+# chat-focused: measured on one real session, prose was 14 KB against 315 KB of tool traffic, so the
+# record of what was actually DONE — files changed, releases cut — existed nowhere searchable (#756).
+#
+# The fix is a snippet of value per action, not the payload. A tool call becomes ONE line naming the
+# change; the 93 KB of tool_use in that session compresses to ~10 KB of readable spine. Deliberately
+# STATE-CHANGING only: greps, reads and inspection are how you find things, not what you did, and
+# including them buried the signal 4:1.
+_ACTION_PREFIXES = ("[changed]", "[ran]")
+_EDIT_TOOLS = ("Edit", "Write", "NotebookEdit")
+_STATE_CHANGING_CMD = re.compile(
+    r"(?:^|[;&|]\s*)\s*(?:sudo\s+)?("
+    r"git\s+(?:commit|push|tag|merge|rebase|reset|revert|cherry-pick)"
+    r"|gh\s+(?:release|pr)\s+create"
+    r"|(?:pip|pip3|uv|npm|pnpm|yarn|cargo|gem|brew|apt|apt-get)\s+"
+    r"(?:install|uninstall|add|remove|publish)"
+    r"|twine\s+upload"
+    r"|engrim\s+(?:add|supersede|import|sync)"
+    r"|mkdir|chmod|chown|ln\s+-s|rm\s|mv\s|cp\s"
+    r")", re.I)
+_ACTION_LINE_CAP = 160
+
+
+def _action_lines(blocks):
+    """One compact line per STATE-CHANGING tool call. Returns [] for pure investigation."""
+    out = []
+    for b in blocks:
+        if not isinstance(b, dict) or b.get("type") != "tool_use":
+            continue
+        name, inp = b.get("name"), b.get("input") or {}
+        if not isinstance(inp, dict):
+            continue
+        if name in _EDIT_TOOLS:
+            path = inp.get("file_path") or inp.get("notebook_path")
+            if path:
+                out.append(f"[changed] {path}")
+        elif name == "Bash":
+            cmd = " ".join((inp.get("command") or "").split())
+            if not cmd or not _STATE_CHANGING_CMD.search(cmd):
+                continue
+            desc = " ".join((inp.get("description") or "").split())
+            line = f"[ran] {desc} — {cmd}" if desc else f"[ran] {cmd}"
+            out.append(line[:_ACTION_LINE_CAP].rstrip())
+    return out
+
+
 def _extract_text(content, include_thinking=False):
-    """Pull the human-readable text out of a Claude transcript message's `content`.
+    """Pull the searchable text out of a Claude transcript message's `content`.
 
     `content` is a str (plain user prompt) or a list of typed blocks. We keep `text` (the visible
-    exchange), optionally `thinking`, and skip tool_use/tool_result/images so the log stays the
-    actual conversation, not machinery."""
+    exchange), optionally `thinking`, plus a one-line summary of each state-changing tool call
+    (see `_action_lines`). Tool RESULTS and images are still skipped — they're bulk, not signal."""
     if isinstance(content, str):
         return content.strip()
     if not isinstance(content, list):
@@ -1474,6 +1562,7 @@ def _extract_text(content, include_thinking=False):
             parts.append(b.get("text", ""))
         elif t == "thinking" and include_thinking:
             parts.append("[thinking] " + b.get("thinking", ""))
+    parts.extend(_action_lines(content))
     return "\n".join(p for p in parts if p).strip()
 
 
@@ -1557,6 +1646,27 @@ def cmd_log(conn, a) -> None:
                            payload.get("session_id"), a.include_thinking)
         return  # silent: this runs from a hook
     project = _resolve_project(a.project)
+    if getattr(a, "reindex", False):
+        # Re-derive `content` from the preserved `raw` for turns already on disk. Because raw was
+        # always kept in full, action lines can be recovered for the ENTIRE history — the feature
+        # doesn't start empty on a store with 44k turns behind it. Only ADDS extracted text; a turn
+        # whose re-extraction yields nothing keeps whatever it had.
+        n, changed = 0, 0
+        for r in conn.execute(
+                "SELECT id, content, raw FROM log WHERE project = ? AND raw IS NOT NULL",
+                (project,)).fetchall():
+            n += 1
+            try:
+                blocks = json.loads(r["raw"]).get("message", {}).get("content")
+            except Exception:
+                continue
+            fresh = _extract_text(blocks, a.include_thinking)
+            if fresh and fresh != (r["content"] or ""):
+                conn.execute("UPDATE log SET content = ? WHERE id = ?", (fresh, r["id"]))
+                changed += 1
+        conn.commit()
+        print(f"reindexed {n} turn(s) · {changed} gained text -> project={project}")
+        return
     if a.from_transcript:
         n = _ingest_transcript(conn, project, a.from_transcript, a.session, a.include_thinking)
         print(f"logged {n} new turn(s) from transcript -> project={project}")
@@ -1672,8 +1782,13 @@ def _decision_snippet(text, cues=_DECISION_CUES):
 def _looks_like_narration(snippet):
     """True if the snippet is the agent's own process/meta chatter rather than a project decision
     (#197). Drops it from the clear-readiness signal so 'to capture' counts real decisions only."""
-    low = (snippet or "").lower()
-    return any(m in low for m in _NARRATION_MARKERS)
+    s = (snippet or "").lstrip()
+    # Action lines are a record of WORK, not a decision to capture. They're searchable via
+    # `recall --log`, but they must never inflate the "to capture" nudge — the counter's precision is
+    # the whole reason it's trusted (#219, #747).
+    if s.startswith(_ACTION_PREFIXES):
+        return True
+    return any(m in s.lower() for m in _NARRATION_MARKERS)
 
 
 def _semantic_decision_snippet(content, fn, exemplar_vecs):
@@ -1949,6 +2064,9 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--detail", action="store_true")
     pr.add_argument("--include-stale", action="store_true")
     pr.add_argument("--json", action="store_true")
+    pr.add_argument("--log", action="store_true",
+                    help="also search the transcript log (prose + state-changing actions). Opt-in: "
+                         "the log never auto-loads into context, but it's searchable on demand")
     pr.set_defaults(func=cmd_recall)
 
     pl = sub.add_parser("list")
@@ -2013,6 +2131,9 @@ def build_parser() -> argparse.ArgumentParser:
     plog.add_argument("--from-transcript", help="ingest new turns from a Claude Code transcript JSONL")
     plog.add_argument("--hook", action="store_true",
                       help="read a Stop-hook JSON from stdin and ingest the session's new turns")
+    plog.add_argument("--reindex", action="store_true",
+                      help="re-derive searchable text from the raw turns already stored (recovers "
+                           "action lines for history logged before they existed)")
     plog.add_argument("--include-thinking", action="store_true",
                       help="also log assistant 'thinking' blocks (off by default; large + internal)")
     plog.set_defaults(func=cmd_log)
