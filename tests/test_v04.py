@@ -721,3 +721,44 @@ def test_curate_directives_ask_for_measurements_not_conclusions(tmp_path, capsys
     capsys.readouterr()
     main(["--db", str(db), "hook", "--no-sync", "-p", "/p"])   # boot path sets agent_directive itself
     assert "MEASURED" in capsys.readouterr().out
+
+
+# --- the verdict cache: a new log turn must not re-cost a model load ------------------------------
+
+def test_semantic_verdict_survives_new_log_turns(tmp_path, monkeypatch):
+    """A new log row lands EVERY turn. A verdict about "is this snippet curated?" depends only on the
+    curated side, so turns must not invalidate it — otherwise the status bar pays a full model load
+    once per turn for the whole session (measured at ~1.2s before this cache existed)."""
+    calls = []
+    base = _concept_embedder()
+    monkeypatch.setattr(cli, "_EMBEDDER_OVERRIDE",
+                        ((lambda t: (calls.append(t), base(t))[1]), "toy"), raising=False)
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "office plants need weekly water"])
+    _insert_log(str(db), "/p", "We decided to migrate the billing service to Kafka.")
+
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p") == 1
+    after_first = len(calls)
+    assert after_first > 0, "the semantic tier should have run for an unmatched snippet"
+
+    for i in range(3):                      # ordinary turns, no decision cue — i.e. most of a session
+        _insert_log(str(db), "/p", f"Ran the suite for pass {i} and read the output.",
+                    ts=f"2026-06-20T10:0{i}:00")
+        conn = cli.connect(str(db))
+        assert cli._uncaptured_count(conn, "/p") == 1
+    assert len(calls) == after_first, "new log turns must not re-embed an already-judged snippet"
+
+
+def test_semantic_verdict_invalidates_when_curation_changes(tmp_path, monkeypatch):
+    """The cache may not outlive the thing it's a verdict about: curating the decision clears it."""
+    monkeypatch.setattr(cli, "_EMBEDDER_OVERRIDE", (_concept_embedder(), "toy"), raising=False)
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "office plants need weekly water"])
+    _insert_log(str(db), "/p", "We decided to migrate the billing service to Kafka.")
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p") == 1
+    main(["--db", str(db), "add", "-p", "/p", "-t", "decision",
+          "-s", "billing moves onto a streaming backbone for throughput"])   # a PARAPHRASE
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p") == 0
