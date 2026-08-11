@@ -100,8 +100,10 @@ work without it ever cluttering the chat:
   tokens, never loaded into context). It's the live proof that nothing is silently dropping on the floor.
 - **`✎ 2 to capture` / `✓ clear-safe`** — recent decisions that don't yet appear in curated memory. Your
   at-a-glance **"is it safe to `/clear`?"** answer: capture what's flagged, watch it flip to `✓`, then
-  clear freely. The pencil is an invitation, not a warning — capturing as you work is normal. (Same honest
-  signal as `engrim review`, kept light enough to live in the status bar.)
+  clear freely. The pencil is an invitation, not a warning — capturing as you work is normal. It's the
+  *same* signal `engrim review` reports — same scan window, same captured-check — so the bar and the
+  command can't tell you different things about the same store. Capturing a decision **in your own
+  words** clears it: the check matches on meaning, not just wording.
 
 The number that *moves* is the log; the number that *matters long-term* is curated. Seeing both is how
 you learn the rhythm: work, capture the decisions, clear, reload.
