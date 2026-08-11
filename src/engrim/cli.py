@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -1709,6 +1710,61 @@ def _max_similarity(conn, project, text, fn):
 
 _UNSET = object()   # "caller didn't supply an embedder" — distinct from an explicit None ("lexical only")
 
+# Per-SNIPPET semantic verdict cache. The count-level memo alone isn't enough: its fingerprint includes
+# the newest log row, and a new row lands every single turn, so on a project with a live nag the first
+# status refresh after each turn paid a full ~1.2s model load. A verdict about "is THIS snippet already
+# curated?" only goes stale when the CURATED side changes — new log turns are irrelevant to it. So this
+# is keyed on curated state alone, which means the embedder loads once per genuinely new decision, not
+# once per turn. Bounded and stored as one small meta row; a curation change drops the whole map.
+_SEM_VERDICT_CAP = 96
+
+
+def _curated_state_key(conn, project):
+    """Fingerprint of the CURATED side only — what a captured-verdict actually depends on."""
+    row = conn.execute(
+        "SELECT MAX(ts), COUNT(*) FROM memories WHERE project=? AND status='active'",
+        (project,)).fetchone()
+    return f"{row[0]}|{row[1]}|{os.environ.get('ENGRIM_EMBED', '').strip().lower()}"
+
+
+def _snippet_key(snippet):
+    return hashlib.sha1((snippet or "").lower().encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _semantic_verdict_get(conn, project, snippet):
+    """(verdict, state) — verdict is None on a miss. `state` is handed back so the caller can store
+    under the same fingerprint it read, without recomputing it."""
+    try:
+        state = _curated_state_key(conn, project)
+    except Exception:
+        return None, None
+    try:
+        blob = _meta_get(conn, project, "cap_cache")
+        if blob:
+            d = json.loads(blob)
+            if d.get("k") == state:
+                v = d.get("v", {}).get(_snippet_key(snippet))
+                if v is not None:
+                    return bool(v), state
+    except Exception:
+        pass
+    return None, state
+
+
+def _semantic_verdict_put(conn, project, snippet, verdict, state):
+    if not state:
+        return
+    try:
+        blob = _meta_get(conn, project, "cap_cache")
+        d = json.loads(blob) if blob else {}
+        v = d.get("v", {}) if d.get("k") == state else {}     # curation moved -> start clean
+        if len(v) >= _SEM_VERDICT_CAP:
+            v = {}                                            # bounded; cheap to refill
+        v[_snippet_key(snippet)] = 1 if verdict else 0
+        _meta_set(conn, project, "cap_cache", json.dumps({"k": state, "v": v}))
+    except Exception:
+        pass                                                  # a read-only db must never break the bar
+
 
 def _is_captured(conn, project, snippet, fn=_UNSET):
     """THE definition of "this decision is already in curated memory". Every clear-readiness surface
@@ -1729,9 +1785,18 @@ def _is_captured(conn, project, snippet, fn=_UNSET):
     pass None to force pure-lexical."""
     if _lexical_overlap_captured(conn, project, snippet):
         return True
+    # Consult the verdict cache BEFORE resolving an embedder — resolving is what costs ~1s, so a
+    # lookup after it would save nothing.
+    cached, state = _semantic_verdict_get(conn, project, snippet)
+    if cached is not None:
+        return cached
     if fn is _UNSET:                    # not supplied -> resolve lazily (cached per process)
         fn, _ = _resolve_embedder()
-    return bool(fn) and _max_similarity(conn, project, snippet, fn) >= _CAPTURED_SIM
+    if not fn:
+        return False
+    verdict = _max_similarity(conn, project, snippet, fn) >= _CAPTURED_SIM
+    _semantic_verdict_put(conn, project, snippet, verdict, state)
+    return verdict
 
 
 def _lexical_overlap_captured(conn, project, snippet):
