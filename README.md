@@ -227,7 +227,27 @@ With `engrim setup`, a `Stop` hook tails Claude Code's own transcript JSONL into
 turn — reading only the new bytes (a per-session byte-offset cursor) and de-duping on each turn's
 stable `uuid`, so it's cheap and idempotent. Writing to the log costs **zero tokens and zero
 context** (it's a disk append), so you can `/clear` every single turn and lose nothing. Browse or
-search it with `engrim logs [-q "..."]`.
+search it with `engrim logs [-q "..."]`, or search it alongside curated memory with
+`engrim recall -q "..." --log`.
+
+### The log records the work, not just the talk
+
+A transcript kept as prose only is **too chat-focused**: on one real session the visible text was
+14 KB against 315 KB of tool traffic, so what was actually *done* — files changed, releases cut —
+existed nowhere searchable. So each **state-changing** tool call is folded into the log as one line:
+
+```
+[changed] src/engrim/cli.py
+[ran] Cut the release — gh release create v1.2.0 …
+```
+
+A snippet of value, not the payload — 93 KB of tool calls became ~10 KB of readable spine. It's
+deliberately state-changing only: greps and reads are how you *find* things, not what you did, and
+including them buried the signal 4:1. Action lines never trip the `✎ to capture` nudge — they're a
+record of work, not a decision to curate — and the log still never auto-loads into context.
+
+Already have history? `engrim log --reindex` re-derives them from the raw turns already on disk,
+so the feature doesn't start empty.
 
 > **engrim does not enlarge Claude's context window** — nothing can. It lets you *use* the window
 > efficiently: load a lean slice, keep the rest on disk, pull more only when you ask. That's the
@@ -325,7 +345,7 @@ volume. (Avoid a single store over a network filesystem like NFS.)
 |---|---|
 | `engrim setup` | wire the four-hook loop into Claude Code + warm the semantic model (one-time, idempotent) |
 | `engrim add` | write a memory: `-t TYPE -s "summary" [-d detail] [--tags a,b]` (auto-embeds); `--global` writes the user-layer that loads in every project |
-| `engrim recall -q "..."` | hybrid keyword + semantic recall for the current project |
+| `engrim recall -q "..."` | hybrid keyword + semantic recall for the current project; `--log` also searches the transcript log |
 | `engrim assist` | **the minder** — UserPromptSubmit hook: auto-inject the relevant slice for a prompt |
 | `engrim context` | priority-ordered, budget-capped session-boot pack |
 | `engrim review` | **"safe to clear" coverage check** — flags recent decisions in the log not yet in curated memory |
@@ -333,6 +353,7 @@ volume. (Avoid a single store over a network filesystem like NFS.)
 | `engrim import <path>` | bulk-import markdown notes as records (insert-only) |
 | `engrim embed` | backfill embeddings (rarely needed — `add` auto-embeds; use after a model change) |
 | `engrim logs [-q "..."]` | browse/search the transcript log (kept out of the boot pack) |
+| `engrim log --reindex` | re-derive searchable text from stored raw turns (recovers action lines for old history) |
 | `engrim supersede --id N` | mark a record `superseded`/`done` |
 | `engrim list` · `projects` · `stats` | browse and summarize (stats reports context economics) |
 | `engrim mcp` | run engrim as an [MCP server](#use-it-as-an-mcp-server) (stdio) for any MCP client |

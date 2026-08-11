@@ -762,3 +762,78 @@ def test_semantic_verdict_invalidates_when_curation_changes(tmp_path, monkeypatc
           "-s", "billing moves onto a streaming backbone for throughput"])   # a PARAPHRASE
     conn = cli.connect(str(db))
     assert cli._uncaptured_count(conn, "/p") == 0
+
+
+# --- action lines: source the WORK, not just the chat (#756) -------------------------------------
+
+def _tool_turn(tmp_path, *blocks, uuid="t1"):
+    p = tmp_path / f"{uuid}.jsonl"
+    p.write_text(json.dumps({
+        "type": "assistant", "uuid": uuid, "sessionId": "s", "timestamp": "2026-01-01T00:00:00Z",
+        "message": {"role": "assistant", "content": list(blocks)}}) + "\n", encoding="utf-8")
+    return p
+
+
+def test_state_changing_tool_calls_become_searchable_action_lines(tmp_path):
+    db = tmp_path / "m.db"
+    t = _tool_turn(tmp_path,
+                   {"type": "text", "text": "Shipping it."},
+                   {"type": "tool_use", "name": "Edit", "input": {"file_path": "/repo/src/cli.py"}},
+                   {"type": "tool_use", "name": "Bash",
+                    "input": {"command": "git commit -m 'release 1.2.0'", "description": "Commit the release"}})
+    main(["--db", str(db), "log", "--from-transcript", str(t), "-p", "/p"])
+    c = sqlite3.connect(db)
+    content = c.execute("SELECT content FROM log WHERE project='/p'").fetchone()[0]
+    assert "Shipping it." in content                       # prose still kept
+    assert "[changed] /repo/src/cli.py" in content
+    assert "[ran] Commit the release" in content
+
+
+def test_investigation_is_not_logged_as_an_action(tmp_path):
+    """Greps and reads are how you FIND things, not what you did — including them buried the signal."""
+    db = tmp_path / "m.db"
+    t = _tool_turn(tmp_path,
+                   {"type": "tool_use", "name": "Read", "input": {"file_path": "/repo/src/cli.py"}},
+                   {"type": "tool_use", "name": "Bash",
+                    "input": {"command": "grep -rn foo src/", "description": "Search for foo"}},
+                   {"type": "tool_result", "content": "lots and lots of output"})
+    main(["--db", str(db), "log", "--from-transcript", str(t), "-p", "/p"])
+    c = sqlite3.connect(db)
+    assert (c.execute("SELECT content FROM log WHERE project='/p'").fetchone()[0] or "") == ""
+
+
+def test_action_lines_do_not_inflate_the_capture_nudge(tmp_path):
+    """Actions are a record of work, not a decision to curate — the counter's precision is the whole
+    reason it's trusted, so they must never trip it."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed record"])
+    _insert_log(str(db), "/p", "[changed] /repo/src/cli.py\n[ran] Commit the release — git commit -m x")
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p") == 0
+
+
+def test_recall_log_searches_the_transcript_and_is_opt_in(tmp_path, capsys):
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "unrelated curated record"])
+    _insert_log(str(db), "/p", "[changed] /repo/src/billing.py")
+    capsys.readouterr()
+    main(["--db", str(db), "recall", "-p", "/p", "-q", "billing"])           # default: curated only
+    assert "billing.py" not in capsys.readouterr().out
+    main(["--db", str(db), "recall", "-p", "/p", "-q", "billing", "--log"])  # opt in
+    out = capsys.readouterr().out
+    assert "billing.py" in out and "log ·" in out
+
+
+def test_log_reindex_recovers_actions_from_history(tmp_path, capsys):
+    """raw was always kept in full, so action lines can be recovered for turns logged before the
+    feature existed — it doesn't start empty on a store with a long history behind it."""
+    db = tmp_path / "m.db"
+    t = _tool_turn(tmp_path, {"type": "tool_use", "name": "Edit", "input": {"file_path": "/repo/a.py"}})
+    main(["--db", str(db), "log", "--from-transcript", str(t), "-p", "/p"])
+    c = sqlite3.connect(db)                                  # simulate a pre-feature row: raw kept, no text
+    c.execute("UPDATE log SET content = ''"); c.commit(); c.close()
+    capsys.readouterr()
+    main(["--db", str(db), "log", "--reindex", "-p", "/p"])
+    assert "1 gained text" in capsys.readouterr().out
+    c = sqlite3.connect(db)
+    assert "[changed] /repo/a.py" in c.execute("SELECT content FROM log").fetchone()[0]
