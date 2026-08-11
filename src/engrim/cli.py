@@ -574,7 +574,9 @@ def cmd_assist(conn, a) -> None:
         if unc >= _ASSIST_CURATE_FLOOR:
             directive = (f"\n[engrim · auto-curate] {unc} decisions are logged but not yet in curated "
                          "memory. Before your next reply, SILENTLY `engrim add` the durable ones "
-                         "(skip chatter, reversed calls, and false-positives); don't announce it.")
+                         "(skip chatter, reversed calls, and false-positives); don't announce it. "
+                         "Record what was MEASURED, not what was concluded — 'momentum score is the "
+                         "constant 92.0' ages well; 'momentum looks broken' doesn't.")
     except Exception:
         directive = ""
     if not out and not directive:
@@ -711,9 +713,8 @@ def _boot_pack(rows, budget):
 # already records every turn, but the curated boot pack never read the log, so the last stretch of work
 # vanished on clear. Deliberately tiny and SEPARATE from the curated budget — a hard item cap plus its
 # own char sub-budget — so it can never crowd out curated records or bloat context. Dedup uses the
-# LEXICAL captured-check (no embedder) to keep every boot fast and model-load-free; the explicitly-run
-# `review` stays embedder-precise. Biases toward showing recent work (continuity) over hiding it.
-_TAIL_SCAN = 40            # recent log turns to scan for decision signal
+# SHARED captured-check (`_is_captured`), same as `review` and the status bar, so the three surfaces
+# can never disagree about what's already curated. Biases toward showing recent work over hiding it.
 _TAIL_MAX_ITEMS = 3        # hard cap on tail lines — recency hint, not a transcript dump
 _TAIL_BUDGET = 600         # own char sub-budget, independent of the curated boot budget
 _TAIL_SNIPPET_CAP = 180    # per-line truncation
@@ -727,10 +728,23 @@ _TAIL_SNIPPET_CAP = 180    # per-line truncation
 # window so a fresh project stays lean.
 _UNCAPTURED_MAX_SCAN = 200
 
+# ONE lean recent window for every clear-readiness surface — the status bar, the minder's auto-curate
+# nudge, the boot tail, and `review`. They used to carry their own numbers (25 vs 40 vs a flat -k),
+# so the bar could count a turn `review` never scanned and the two would report different backlogs
+# on the same db (#747). Same window + same captured-check = they agree by construction.
+_CAPTURE_SCAN = 40
+_TAIL_SCAN = _CAPTURE_SCAN
+
 # Mid-session auto-curate backstop: the boot directive only fires at the NEXT session, so a single long
 # session can accumulate uncaptured decisions. Once the backlog crosses this floor the minder nudges the
-# AGENT (not the user) to promote them. Set high enough that ordinary work-in-progress never trips it.
-_ASSIST_CURATE_FLOOR = 4
+# AGENT (not the user) to promote them.
+#
+# Floor of 2, lowered from 4 (Tim, 2026-08-11): a wrap-time-only capture habit loses exactly the
+# sessions that ran long — the ones worth keeping — because a window-close or limit-expiry can't
+# curate itself. Capture wants to happen at the MOMENT of the decision. The old floor of 4 was priced
+# for a counter that cried wolf; now that the captured-check can't false-positive on a paraphrase
+# (#747), an earlier nudge is cheap and the backlog rarely gets deep enough to lose.
+_ASSIST_CURATE_FLOOR = 2
 
 
 def _parse_ts(s):
@@ -792,7 +806,7 @@ def _recent_tail(conn, project, scan=_TAIL_SCAN, max_items=_TAIL_MAX_ITEMS, budg
         if not snip or key in seen or _looks_like_narration(snip):
             continue
         seen.add(key)
-        if _lexical_overlap_captured(conn, project, snip):     # already covered by a curated record
+        if _is_captured(conn, project, snip):     # already covered by a curated record
             continue
         if len(snip) > _TAIL_SNIPPET_CAP:
             snip = snip[:_TAIL_SNIPPET_CAP - 1].rstrip() + "…"
@@ -806,10 +820,37 @@ def _recent_tail(conn, project, scan=_TAIL_SCAN, max_items=_TAIL_MAX_ITEMS, budg
     return out
 
 
-def _uncaptured_count(conn, project, scan=25, cap=9):
-    """Cheap, model-free count of recent decision-signal log turns not yet covered by a curated record —
-    the same 'safe to clear?' signal `review` reports, kept light enough for the ambient status bar (a
-    small bounded log scan + lexical capture-check, no embedder). Powers the live 'N to capture' nudge."""
+def _uncaptured_state_key(conn, project):
+    """Fingerprint of everything `_uncaptured_count` reads: the newest logged turn, the newest curated
+    record, and how many records are active (so a `supersede` invalidates too). Plus the embed mode,
+    since that changes which tier of the captured-check can run."""
+    row = conn.execute(
+        "SELECT (SELECT MAX(ts) FROM log WHERE project=?),"
+        "       (SELECT MAX(ts) FROM memories WHERE project=? AND status='active'),"
+        "       (SELECT COUNT(*) FROM memories WHERE project=? AND status='active')",
+        (project, project, project)).fetchone()
+    mode = os.environ.get("ENGRIM_EMBED", "").strip().lower()
+    return f"{row[0]}|{row[1]}|{row[2]}|{mode}"
+
+
+def _uncaptured_count(conn, project, scan=_CAPTURE_SCAN, cap=9):
+    """Count of recent decision-signal log turns not yet covered by a curated record — the live
+    "safe to clear?" signal behind the status bar's `✎ N to capture` and the minder's auto-curate
+    nudge. Shares BOTH the scan window (`_CAPTURE_SCAN`) and the captured-check (`_is_captured`) with
+    `review`, so the ambient number and the explicit command can't contradict each other (#747).
+
+    Kept cheap two ways: the lexical tier resolves most snippets with no model at all, and the result
+    is memoized against a fingerprint of the rows it read — so the status bar, which re-runs on every
+    refresh, recomputes only when the log or the store actually changed."""
+    try:
+        state = _uncaptured_state_key(conn, project)
+        cached = _meta_get(conn, project, "unc_cache")
+        if cached:
+            ckey, _, cval = cached.partition("=")
+            if ckey == state and cval.isdigit():
+                return int(cval)
+    except Exception:
+        state = None
     try:
         floor = _capture_floor(conn, project)
         rows = conn.execute("SELECT ts, content FROM log WHERE project=? ORDER BY ts DESC LIMIT ?",
@@ -828,11 +869,16 @@ def _uncaptured_count(conn, project, scan=25, cap=9):
         if not snip or key in seen or _looks_like_narration(snip):
             continue
         seen.add(key)
-        if _lexical_overlap_captured(conn, project, snip):
+        if _is_captured(conn, project, snip):
             continue
         n += 1
         if n >= cap:
             break
+    if state:
+        try:
+            _meta_set(conn, project, "unc_cache", f"{state}={n}")
+        except Exception:
+            pass                                 # a read-only db must never break the status bar
     return n
 
 
@@ -904,6 +950,8 @@ def cmd_context(conn, a) -> None:
                       "engrim add -t <decision|fact|state|feedback> -s \"<one line>\" [-d \"<why>\"]")
                 print("  Skip chatter, reversed calls, and product copy (known false-positives) — keep the "
                       "store high-signal. Don't announce this; just curate, then proceed.")
+                print("  Write what was MEASURED, not what was concluded: 'momentum score is the constant "
+                      "92.0' stays true and useful; 'momentum looks broken' rots into a dead end.")
         elif unc:
             print(f"\n✎ {unc} recent decision(s) not yet curated — worth capturing before your next "
                   "/clear:  engrim add -t decision -s \"…\"")
@@ -1659,9 +1707,36 @@ def _max_similarity(conn, project, text, fn):
     return max(_cosine(qv, _blob_vec(r["vec"])) for r in rows)
 
 
+_UNSET = object()   # "caller didn't supply an embedder" — distinct from an explicit None ("lexical only")
+
+
+def _is_captured(conn, project, snippet, fn=_UNSET):
+    """THE definition of "this decision is already in curated memory". Every clear-readiness surface
+    (status bar, minder nudge, boot tail, `review`) must route through here — they used to each pick
+    their own check, and on a host WITH an embedder that split into two different answers: `review`
+    scored a paraphrase as captured (cosine >= _CAPTURED_SIM) while the bar, hard-wired to the lexical
+    check, kept counting it forever. Curating a decision in your own words then never cleared the
+    nudge, so the counter looked stale and cried wolf — the exact trust the clear-safe signal is for
+    (#219, #747).
+
+    Evidence is a UNION: strong word overlap OR semantic match. Both are evidence of the same thing,
+    and taking either keeps the answer stable when the embedder is unavailable on one call and present
+    on the next (a lexical hit stays a hit either way).
+
+    Tiered on purpose: the lexical pass is free and runs first, so a project that's already clear-safe
+    never pays for a model load. Only a snippet that lexical would NAG about escalates to the embedder
+    — cost lands exactly where it buys precision. Pass `fn` if you've already resolved an embedder;
+    pass None to force pure-lexical."""
+    if _lexical_overlap_captured(conn, project, snippet):
+        return True
+    if fn is _UNSET:                    # not supplied -> resolve lazily (cached per process)
+        fn, _ = _resolve_embedder()
+    return bool(fn) and _max_similarity(conn, project, snippet, fn) >= _CAPTURED_SIM
+
+
 def _lexical_overlap_captured(conn, project, snippet):
-    """Lexical fallback for the captured-check (used only when there's no embedding backend): does any
-    active record share most of the snippet's content words? Conservative on purpose."""
+    """Lexical tier of the captured-check (see `_is_captured`): does any active record share most of
+    the snippet's content words? Conservative on purpose."""
     toks = set(re.findall(r"[a-z0-9]{4,}", snippet.lower()))
     if not toks:
         return False
@@ -1688,9 +1763,19 @@ def cmd_review(conn, a) -> None:
         print("  no transcript log yet — nothing to check. "
               "(the Stop hook captures turns as you work, then `review` can vet them.)")
         return
-    rows = conn.execute(
+    # Same hybrid window the automatic surfaces use: the lean recent `-k` turns, extended back to the
+    # last capture so a decision buried under a long verification tail is still in scope. A flat
+    # last-k window here was half of why the status bar and `review` disagreed — the bar could count a
+    # turn `review` never looked at (#747).
+    floor = _capture_floor(conn, project)
+    scanned = conn.execute(
         "SELECT ts, content FROM log WHERE project = ? ORDER BY ts DESC LIMIT ?",
-        (project, a.k)).fetchall()
+        (project, max(a.k, _UNCAPTURED_MAX_SCAN))).fetchall()
+    rows = []
+    for i, r in enumerate(scanned):
+        if _past_floor(r, floor, i, a.k):
+            break
+        rows.append(r)
     print(f"  log: {total_log} turns (scanned last {len(rows)}) · curated: {curated} active records")
 
     # Resolve the embedder up front: it raises candidate RECALL (cue-less real decisions, #200) and
@@ -1719,11 +1804,9 @@ def cmd_review(conn, a) -> None:
               "(heuristic, not proof: eyeball anything you know was important.)")
         return
 
-    uncaptured = [
-        (ts, snip) for ts, snip in candidates
-        if not ((_max_similarity(conn, project, snip, fn) >= _CAPTURED_SIM) if fn
-                else _lexical_overlap_captured(conn, project, snip))
-    ]
+    # Shared captured-check — `fn` is passed explicitly (possibly None) so review uses exactly the
+    # embedder it resolved above, and the bar's lazy resolution can't diverge from it.
+    uncaptured = [(ts, snip) for ts, snip in candidates if not _is_captured(conn, project, snip, fn)]
     print(f"  {len(candidates)} decision-signal turn(s) detected; "
           f"{len(candidates) - len(uncaptured)} look captured, {len(uncaptured)} may not be.")
     if not uncaptured:
@@ -1895,7 +1978,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     prv = sub.add_parser("review")
     prv.add_argument("-p", "--project", default="auto")
-    prv.add_argument("-k", type=int, default=40, help="how many recent log turns to scan (default 40)")
+    prv.add_argument("-k", type=int, default=_CAPTURE_SCAN,
+                     help=f"lean recent window of log turns to scan (default {_CAPTURE_SCAN}); the scan "
+                          "always extends back to the last capture on top of this")
     prv.set_defaults(func=cmd_review)
 
     sub.add_parser("projects").set_defaults(func=cmd_projects)

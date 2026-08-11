@@ -1,8 +1,10 @@
 """Tests for the v0.4 surface: seed-once sync, the transcript log, and the minder."""
 import io
 import json
+import re
 import sqlite3
 
+import engrim.cli as cli
 from engrim.cli import main
 
 
@@ -573,3 +575,149 @@ def test_statusline_narration_does_not_trip_capture_nudge(tmp_path, capsys, monk
     main(["--db", str(db), "statusline", "-p", "/p"])
     out = capsys.readouterr().out
     assert "to capture" not in out and "clear-safe" in out
+
+
+# --- one captured-check, one window: the bar and `review` must never disagree (#747) -------------
+#
+# The bug: on a host WITH an embedder, `review` scored a paraphrase as captured while the status bar
+# and the minder's auto-curate nudge were hard-wired to the LEXICAL check and kept counting it. So
+# curating a decision in your own words never cleared the nudge — it just accumulated and cried wolf.
+
+def _backdate_records(db, ts):
+    """Age the curated records so the capture floor sits BEHIND the log turns — i.e. the decisions
+    were logged after the last `add`, which is the situation the recency net exists for."""
+    con = sqlite3.connect(db)
+    con.execute("UPDATE memories SET ts = ?", (ts,))
+    con.commit()
+    con.close()
+
+
+def _concept_embedder():
+    """Deterministic toy embedder with a synonym notion, so the SEMANTIC tier is what's under test:
+    'kafka' and 'streaming backbone' land on the same axis despite sharing no words."""
+    concepts = (("kafka", "streaming", "broker", "throughput"),
+                ("postgres", "relational", "sql"),
+                ("plants", "water", "office"))
+
+    def fn(text):
+        low = (text or "").lower()
+        v = [float(sum(w in low for w in group)) for group in concepts]
+        return v if any(v) else [0.001, 0.0, 0.0]
+    return fn
+
+
+def test_paraphrased_capture_clears_the_bar_not_just_review(tmp_path, monkeypatch):
+    """A decision curated in DIFFERENT WORDS is captured. Both surfaces must say so."""
+    db = tmp_path / "m.db"
+    monkeypatch.setattr(cli, "_EMBEDDER_OVERRIDE", (_concept_embedder(), "toy"), raising=False)
+    main(["--db", str(db), "add", "-p", "/p", "-t", "decision",
+          "-s", "billing moves onto a streaming backbone for throughput"])
+    _insert_log(str(db), "/p", "We decided to migrate the billing service to Kafka.")
+
+    conn = cli.connect(str(db))
+    snip = "We decided to migrate the billing service to Kafka."
+    # the paraphrase does NOT clear the lexical bar — semantics are the only thing that can catch it
+    assert not cli._lexical_overlap_captured(conn, "/p", snip)
+    assert cli._is_captured(conn, "/p", snip)
+    assert cli._uncaptured_count(conn, "/p") == 0        # pre-fix this was 1, forever
+
+
+def test_bar_and_review_agree_on_the_same_db(tmp_path, capsys, monkeypatch):
+    """The invariant: the ambient count never nags about something `review` calls clean. `review` may
+    surface MORE (it adds cue-less semantic detection); it may never surface fewer."""
+    db = tmp_path / "m.db"
+    monkeypatch.setattr(cli, "_EMBEDDER_OVERRIDE", (_concept_embedder(), "toy"), raising=False)
+    main(["--db", str(db), "add", "-p", "/p", "-t", "decision",
+          "-s", "billing moves onto a streaming backbone for throughput"])
+    _insert_log(str(db), "/p", "We decided to migrate the billing service to Kafka.")
+    _insert_log(str(db), "/p", "We chose to water the office plants weekly.",
+                ts="2026-06-20T09:05:00")
+    capsys.readouterr()
+
+    conn = cli.connect(str(db))
+    bar = cli._uncaptured_count(conn, "/p")
+    main(["--db", str(db), "review", "-p", "/p"])
+    out = capsys.readouterr().out
+    rev = int(re.search(r"(\d+) may not be", out).group(1))
+    assert bar <= rev, f"bar nags about {bar} but review only flags {rev}"
+    assert bar == rev == 1          # the plants decision is uncaptured; Kafka is covered by paraphrase
+
+
+def test_uncaptured_memo_invalidates_when_the_store_changes(tmp_path):
+    """The count is memoized for the status bar's sake — it must still drop the moment the decision
+    is curated, or we've just cached the wolf-crying."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed record"])
+    _insert_log(str(db), "/p", "We decided to migrate the billing service to Kafka for throughput.")
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p") == 1
+    assert cli._uncaptured_count(conn, "/p") == 1            # served from the memo, same answer
+    main(["--db", str(db), "add", "-p", "/p", "-t", "decision",
+          "-s", "migrate the billing service to Kafka for throughput"])
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p") == 0            # memo invalidated by the new record
+
+
+def test_uncaptured_memo_invalidates_on_a_new_log_turn(tmp_path):
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed record"])
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p") == 0
+    _insert_log(str(db), "/p", "We decided to move the scheduler onto a cron worker.",
+                ts="2026-06-21T10:00:00")
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p") == 1            # a fresh decision must break the memo
+
+
+def test_review_window_extends_back_to_the_capture_floor(tmp_path, capsys):
+    """Second half of the divergence: `review` used a flat last-k window while the bar extended back
+    to the last capture, so the bar could count a turn `review` never scanned."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed record"])
+    _backdate_records(str(db), "2026-06-20T09:00:00")        # the last capture happened, then work continued
+    _insert_log(str(db), "/p", "We decided to move the scheduler onto a cron worker.",
+                ts="2026-06-21T10:00:00")
+    for i in range(5):                       # chatter pushes the decision out of a tiny lean window
+        _insert_log(str(db), "/p", f"Running check number {i}.", ts=f"2026-06-21T11:0{i}:00")
+    capsys.readouterr()
+    main(["--db", str(db), "review", "-p", "/p", "-k", "2"])
+    out = capsys.readouterr().out
+    assert "cron worker" in out and "may not be" in out
+    conn = cli.connect(str(db))
+    assert cli._uncaptured_count(conn, "/p", scan=2) == 1     # and the bar sees exactly the same turn
+
+
+# --- capture at the MOMENT of the decision, not at wrap time (Tim, 2026-08-11) -------------------
+
+def test_minder_nudges_at_two_decisions(tmp_path, capsys, monkeypatch):
+    """Floor lowered 4 -> 2: a wrap-time-only habit loses exactly the long sessions worth keeping, so
+    the mid-session nudge has to fire while there's still a session to fire into."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed to init schema"])
+    _insert_log(str(db), "/p", "We decided to use Kafka for the billing pipeline.")
+    _insert_log(str(db), "/p", "We chose Postgres as the system of record.",
+                ts="2026-06-20T09:05:00")
+    capsys.readouterr()
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"prompt": "unrelated weather question"})))
+    main(["--db", str(db), "assist", "-p", "/p"])
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "auto-curate" in ctx
+
+
+def test_curate_directives_ask_for_measurements_not_conclusions(tmp_path, capsys, monkeypatch):
+    """Records that state what was MEASURED outlive records that state what was concluded, so both
+    the mid-session nudge and the boot recovery directive have to say so."""
+    db = tmp_path / "m.db"
+    main(["--db", str(db), "add", "-p", "/p", "-t", "fact", "-s", "seed to init schema"])
+    for i, d in enumerate(["We decided to use Kafka for the billing pipeline.",
+                           "We chose Postgres as the system of record."]):
+        _insert_log(str(db), "/p", d, ts=f"2026-06-20T09:0{i}:00")
+    capsys.readouterr()
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"prompt": "unrelated weather question"})))
+    main(["--db", str(db), "assist", "-p", "/p"])
+    ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "MEASURED" in ctx
+
+    capsys.readouterr()
+    main(["--db", str(db), "hook", "--no-sync", "-p", "/p"])   # boot path sets agent_directive itself
+    assert "MEASURED" in capsys.readouterr().out
