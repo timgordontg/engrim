@@ -2,6 +2,7 @@
 import json
 import sqlite3
 
+import engrim.cli as cli
 from engrim.cli import main
 
 
@@ -177,6 +178,24 @@ def test_home_claude_never_becomes_catch_all_anchor(tmp_path, monkeypatch):
     proj_tag = sqlite3.connect(db).execute("SELECT project FROM memories").fetchone()[0]
     assert os.path.realpath(proj_tag) == os.path.realpath(str(loose))
     assert os.path.realpath(proj_tag) != os.path.realpath(str(home))
+
+
+def test_marker_walk_never_climbs_past_home(tmp_path, monkeypatch):
+    """The walk STOPS at $HOME. It used to keep climbing, which made the tag depend on whatever sat
+    above home on that machine: a dev box with a marker up there resolved differently than a bare CI
+    runner, and pytest's tmp dir lives UNDER home on Windows, so the walk escaped the fixture and
+    found the developer's own `~/.claude`. Same input, different answer per machine."""
+    import os
+    above = tmp_path / "above"
+    (above / ".git").mkdir(parents=True)              # a repo ABOVE home — must stay invisible
+    home = above / "home"
+    home.mkdir()
+    loose = home / "loose_project"                    # no marker of its own
+    loose.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("os.path.expanduser",
+                        lambda p: p.replace("~", str(home)) if p.startswith("~") else p)
+    assert cli._git_root(str(loose)) is None, "the walk climbed past $HOME"
 
 
 def test_env_project_override(tmp_path, monkeypatch):
