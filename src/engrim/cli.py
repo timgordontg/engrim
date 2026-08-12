@@ -84,7 +84,22 @@ def _resolve_project(p, cwd=None):
     if env:
         return env
     base = cwd or os.getcwd()
-    return _git_root(base) or base
+    return _norm_project(_git_root(base) or base)
+
+
+def _norm_project(path: str) -> str:
+    """Stabilise a path-derived project tag so one project can't split into two memory buckets.
+
+    Windows-only, and deliberately so: the tag is a dict key, and there the SAME directory arrives
+    spelled differently depending on who reports it — `C:\\p` from os.getcwd() vs `c:/p` from a hook
+    payload written by Claude Code. Separators and drive-letter case are the two ways that happens;
+    both normalise here, the rest of the path keeps its casing so output still reads naturally.
+    POSIX paths are returned untouched — they're already the one true spelling."""
+    if os.name != "nt" or not path:
+        return path
+    import ntpath          # == os.path on Windows; named explicitly so this is testable anywhere
+    drive, rest = ntpath.splitdrive(ntpath.normpath(path))
+    return drive.upper() + rest
 
 
 def _payload_project(payload, explicit=None):
@@ -1105,6 +1120,26 @@ Keep it high-signal — curation and retrieval precision are the point, not volu
 """
 
 
+def _hook_bin(path: str) -> str:
+    """Quote the resolved engrim path for the shell Claude Code runs hooks in.
+
+    On Windows `which` hands back `C:\\Users\\...\\Scripts\\engrim.EXE`; interpolated raw, bash reads
+    the backslashes as escapes and the command collapses to `C:UserstimgoAppData...` — not found.
+    The `2>/dev/null || true` then swallows the error, so every hook is a silent no-op while setup
+    still prints its green checkmarks. Forward slashes + quotes survive; quoting also fixes paths
+    with spaces on POSIX, which were equally broken and just rarer."""
+    return '"' + path.replace("\\", "/") + '"'
+
+
+def _cmd_has(command: str, marker: str) -> bool:
+    """Does an already-wired hook command carry this marker? Normalised so Windows spellings match.
+
+    `"C:/Users/.../engrim.EXE" hook` has to read as `engrim hook`, or re-running setup won't
+    recognise its own hooks and appends a duplicate group every time (setup is documented idempotent)."""
+    norm = command.replace("\\", "/").replace('"', "").replace("'", "").lower()
+    return marker in norm.replace(".exe", "")
+
+
 def cmd_setup(conn, a) -> None:
     """White-glove: wire the full SessionStart+SessionEnd loop into Claude Code settings.
 
@@ -1112,7 +1147,7 @@ def cmd_setup(conn, a) -> None:
     SessionEnd  `engrim sync --claude` -> mirror the session's file-memory writes into the store.
     Together these keep the SQLite store and Claude Code's md memory in lockstep, session in/out."""
     settings_path = os.path.expanduser(a.settings or "~/.claude/settings.json")
-    engrim_bin = shutil.which("engrim") or "engrim"
+    engrim_bin = _hook_bin(shutil.which("engrim") or "engrim")
     wired = {
         "SessionStart": (f"{engrim_bin} hook 2>/dev/null || true", "engrim hook"),
         "SessionEnd":   (f"{engrim_bin} sync --claude >/dev/null 2>&1 || true", "engrim sync"),
@@ -1126,7 +1161,7 @@ def cmd_setup(conn, a) -> None:
     settings = {}
     if os.path.exists(settings_path):
         try:
-            with open(settings_path) as f:
+            with open(settings_path, encoding="utf-8") as f:   # never the Windows locale codec
                 settings = json.load(f)
         except Exception as e:
             sys.exit(f"settings.json exists but is not valid JSON ({e}). Fix it, then re-run.")
@@ -1135,7 +1170,7 @@ def cmd_setup(conn, a) -> None:
     changed = False
     for event, (cmd, marker) in wired.items():
         groups = hooks.setdefault(event, [])
-        present = any(marker in h.get("command", "")
+        present = any(_cmd_has(h.get("command", ""), marker)
                       for grp in groups for h in grp.get("hooks", []))
         if present:
             print(f"✓ {event} hook already present in {settings_path}")
@@ -1147,7 +1182,7 @@ def cmd_setup(conn, a) -> None:
     # Ambient status line: shows engrim is live + working in the status bar, never in the chat — so the
     # user sees the benefit without being interrupted (the answer to "is this thing even doing anything?").
     sl, sl_cmd = settings.get("statusLine"), f"{engrim_bin} statusline"
-    if isinstance(sl, dict) and "engrim" in (sl.get("command") or ""):
+    if isinstance(sl, dict) and _cmd_has(sl.get("command") or "", "engrim"):
         print("✓ status line already shows engrim")
     elif sl:
         print(f"• a status line is already configured — leaving it. To show engrim, set its command to: {sl_cmd}")
@@ -1158,7 +1193,7 @@ def cmd_setup(conn, a) -> None:
 
     if changed:
         tmp = settings_path + ".engrim-tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
         os.replace(tmp, settings_path)  # atomic: never leave a half-written settings.json
 
@@ -1166,12 +1201,12 @@ def cmd_setup(conn, a) -> None:
         md_path = os.path.expanduser("~/.claude/CLAUDE.md")
         existing = ""
         if os.path.exists(md_path):
-            with open(md_path) as f:
-                existing = f.read()
+            with open(md_path, encoding="utf-8", errors="replace") as f:
+                existing = f.read()   # a CLAUDE.md full of emoji must not crash setup on Windows
         if "engrim" in existing and "Project Memory" in existing:
             print(f"✓ CLAUDE.md already mentions engrim ({md_path})")
         else:
-            with open(md_path, "a") as f:
+            with open(md_path, "a", encoding="utf-8") as f:
                 if existing and not existing.endswith("\n"):
                     f.write("\n")
                 f.write("\n" + CLAUDE_MD_BLOCK)
@@ -2188,6 +2223,17 @@ def cmd_mcp(conn, a) -> None:
 
 
 def main(argv=None) -> None:
+    # Windows defaults the std streams to cp1252 the moment they aren't a console — and Claude Code
+    # drives every hook and the status line through pipes. Two live failures came out of that:
+    # `statusline`/`context`/`stats` died with UnicodeEncodeError on the bar's leading 🧠, and stdin
+    # decoding broke the hooks that read a JSON payload (any emoji or smart quote in a prompt).
+    # Both look fine in a terminal, which is what makes them easy to ship. UTF-8 everywhere, and
+    # errors="replace" so an odd byte degrades to a glyph instead of taking the command down.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass                       # not a TextIOWrapper (captured/redirected in-process) — fine
     args = build_parser().parse_args(argv)
     if getattr(args, "k", None) is not None:
         args.k = max(0, args.k)        # a negative LIMIT would dump the whole store

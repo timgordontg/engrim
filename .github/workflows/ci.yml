@@ -6,13 +6,24 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Linux-only CI is why a whole class of Windows bugs shipped unnoticed: setup wrote hook commands
+    # bash couldn't run, and every emoji-bearing command died the moment stdout was a pipe. Runners
+    # capture stdout, so they see exactly what Claude Code sees.
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash          # the shell Claude Code runs hooks in, on all three platforms
     env:
       ENGRIM_EMBED: "off"          # CI stays lexical + offline; `pip install .` still verifies model2vec resolves
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - {os: windows-latest, python-version: "3.13"}
+          - {os: windows-latest, python-version: "3.10"}
+          - {os: macos-latest, python-version: "3.13"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,6 +37,15 @@ jobs:
         run: |
           engrim --help
           engrim add -p /ci -t fact -s "ci smoke" && engrim recall -p /ci -q "ci smoke"
+      # Every one of these is piped here, exactly as Claude Code pipes them — which is the condition
+      # that made them crash on Windows while looking perfect in a terminal.
+      - name: Smoke-test the piped commands (status line, boot pack, minder)
+        run: |
+          engrim statusline -p /ci | cat
+          engrim context -p /ci | cat
+          engrim stats -p /ci | cat
+          echo '{"prompt":"what did we decide about the ci smoke record","workspace":{"project_dir":"/ci"}}' \
+            | engrim assist -p /ci | cat
       - name: Run test suite
         run: |
           pip install pytest

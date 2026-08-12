@@ -13,19 +13,31 @@ set -euo pipefail
 
 DATA="${CLAUDE_PLUGIN_DATA:?CLAUDE_PLUGIN_DATA is required}"
 VENV="$DATA/venv"
-BIN="$VENV/bin/engrim"
 STAMP="$DATA/.installed-source"
+
+# A venv puts its entry points in bin/ on POSIX and in Scripts/ (as .exe) on Windows. Only bin/ was
+# ever checked, so under Git Bash the install would succeed and then fail its own `-x` test: the
+# plugin reported "install failed" every session and all four hooks no-opped forever.
+find_in_venv() {                      # $1 = base name, e.g. engrim / python
+  local c
+  for c in "$VENV/bin/$1" "$VENV/Scripts/$1.exe" "$VENV/Scripts/$1"; do
+    if [ -x "$c" ]; then printf '%s' "$c"; return 0; fi
+  done
+  return 1
+}
+
+BIN="$(find_in_venv engrim)" || BIN=""
 
 # Pin the install source — the published PyPI wheel (fast, no git clone/build).
 # Override with ENGRIM_PLUGIN_SOURCE to track a fork, a branch, a local checkout
 # (-e /path), or a git ref ("git+https://github.com/timgordontg/engrim@<ref>").
-SRC="${ENGRIM_PLUGIN_SOURCE:-engrim==1.1.0}"
+SRC="${ENGRIM_PLUGIN_SOURCE:-engrim==1.2.1}"
 # Split into argv so a multi-token override like "-e /path" reaches pip as two args, not one
 # (a single quoted "$SRC" would collapse them and fail). The default git URL is one token.
 read -r -a SRC_ARGS <<< "$SRC"
 
 # Fast path: already installed at the desired source -> nothing to do.
-if [ -x "$BIN" ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$SRC" ]; then
+if [ -n "$BIN" ] && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$SRC" ]; then
   exit 0
 fi
 
@@ -36,22 +48,30 @@ installed=""
 
 # Preferred path: uv handles venv creation + pip in one fast, self-contained tool.
 if command -v uv >/dev/null 2>&1; then
-  if uv venv "$VENV" >/dev/null 2>&1 \
-     && uv pip install --quiet --python "$VENV/bin/python" "${SRC_ARGS[@]}" >/dev/null 2>&1; then
-    installed=1
+  if uv venv "$VENV" >/dev/null 2>&1; then
+    VPY="$(find_in_venv python)" || VPY=""
+    if [ -n "$VPY" ] \
+       && uv pip install --quiet --python "$VPY" "${SRC_ARGS[@]}" >/dev/null 2>&1; then
+      installed=1
+    fi
   fi
 fi
 
 # Fallback: stdlib venv. On Debian/Ubuntu a venv can come up *without* pip
 # (the python3-venv / ensurepip split), so repair pip via ensurepip first.
 if [ -z "$installed" ]; then
-  PY="$(command -v python3 || true)"
+  # `python3` is the POSIX spelling; the Windows installer ships `python` (and a `py` launcher).
+  PY="$(command -v python3 || command -v python || true)"
   if [ -z "$PY" ]; then
     echo "engrim plugin: no uv and no python3 on PATH — skipping; hooks will no-op." >&2
     exit 0
   fi
   "$PY" -m venv "$VENV" >/dev/null 2>&1 || "$PY" -m venv --without-pip "$VENV" >/dev/null 2>&1 || true
-  VPY="$VENV/bin/python"
+  VPY="$(find_in_venv python)" || VPY=""
+  if [ -z "$VPY" ]; then
+    echo "engrim plugin: could not create a venv — skipping; hooks will no-op." >&2
+    exit 0
+  fi
   if ! "$VPY" -m pip --version >/dev/null 2>&1; then
     "$VPY" -m ensurepip --upgrade >/dev/null 2>&1 || true
   fi
@@ -61,7 +81,8 @@ if [ -z "$installed" ]; then
   fi
 fi
 
-if [ -n "$installed" ] && [ -x "$BIN" ]; then
+BIN="$(find_in_venv engrim)" || BIN=""     # re-resolve: it only exists now that pip has run
+if [ -n "$installed" ] && [ -n "$BIN" ]; then
   printf '%s' "$SRC" >"$STAMP"
   # Warm the static embedder once so the first prompt isn't slowed by a cold load.
   "$BIN" stats >/dev/null 2>&1 || true

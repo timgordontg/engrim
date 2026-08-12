@@ -403,7 +403,9 @@ engrim is built to be safe to run without a second thought. Full posture in [SEC
 ## Testing
 
 A real test suite covers persistence, hybrid + semantic recall, supersession, the boot pack, the
-hook JSON contract, git-root tagging, and the env overrides. CI runs it across Python 3.10–3.13.
+hook JSON contract, git-root tagging, the env overrides, and the cross-platform edges (shell quoting
+of hook commands, non-UTF-8 pipes, both venv layouts). CI runs it across Python 3.10–3.13 on Linux,
+and on macOS and Windows — including the piped commands Claude Code actually invokes.
 
 ```bash
 pip install pytest
