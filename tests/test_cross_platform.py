@@ -16,6 +16,15 @@ import engrim.cli as cli
 from engrim.cli import main
 
 WIN_BIN = r"C:\Users\timgo\AppData\Local\Programs\Python\Python313\Scripts\engrim.EXE"
+_REAL_VERIFY = cli._verify_hook_bin        # kept before the autouse stub below can replace it
+
+
+@pytest.fixture(autouse=True)
+def _assume_bin_runs(monkeypatch):
+    """The wiring tests below fake a binary PATH that doesn't exist on this machine, so the live
+    check in `setup` would fail every one of them for the wrong reason. They're about the command
+    STRING setup writes; the check itself is pinned separately in section 4."""
+    monkeypatch.setattr(cli, "_verify_hook_bin", lambda _bin: None)
 
 
 def _run_setup(tmp_path, monkeypatch, which=WIN_BIN):
@@ -151,6 +160,61 @@ def test_no_text_file_is_opened_with_the_locale_codec():
                     and not re.search(r"""["'][rwax]b["']""", line):
                 offenders.append(f"{path.name}:{n}: {line.strip()}")
     assert not offenders, "text-mode open() without encoding=:\n" + "\n".join(offenders)
+
+
+# ------------------------------------------- 4. the checkmark has to be earned, not just printed
+
+def test_setup_fails_loudly_when_the_wired_binary_cannot_run(tmp_path, monkeypatch, capsys):
+    """The bug this whole file documents: every hook ends in `|| true`, so a completely broken
+    install still printed a full column of green checkmarks and the user walked away happy.
+    Setup must verify the binary it just wired and exit non-zero when it can't run."""
+    monkeypatch.setattr(cli, "_verify_hook_bin", lambda _bin: "command not found")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: WIN_BIN)
+    settings = tmp_path / "settings.json"
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(tmp_path / "m.db"), "setup",
+              "--settings", str(settings), "--no-claude-md"])
+    assert exc.value.code != 0, "a non-functional install must not exit clean"
+    out = capsys.readouterr()
+    assert "NOT done" in str(exc.value)
+    assert "Done." not in out.out, "the success line must not print over a failed check"
+    # The hooks are still written — a fixed PATH should not also require re-wiring by hand.
+    assert json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+
+
+def test_setup_flushes_stdout_before_the_failure_gets_the_last_word(tmp_path, monkeypatch):
+    """The failure message is meant to be the LAST thing on screen, under the checkmarks. It goes to
+    stderr (unbuffered) while the checkmarks go to stdout, which is block-buffered whenever it isn't
+    a terminal — so without an explicit flush the verdict lands FIRST under a pipe. Correct-looking
+    in a bare terminal, inverted everywhere else: the same shape as the cp1252 bug above."""
+    flushed = []
+
+    class _TrackingOut(io.StringIO):
+        def flush(self):
+            flushed.append(self.getvalue())
+            super().flush()
+
+    monkeypatch.setattr(cli, "_verify_hook_bin", lambda _bin: "command not found")
+    monkeypatch.setattr(cli.shutil, "which", lambda _n: WIN_BIN)
+    monkeypatch.setattr(cli.sys, "stdout", _TrackingOut())
+    with pytest.raises(SystemExit):
+        main(["--db", str(tmp_path / "m.db"), "setup",
+              "--settings", str(tmp_path / "settings.json"), "--no-claude-md"])
+    assert flushed, "stdout was never flushed, so the verdict can print above the checkmarks"
+    assert "wired SessionStart hook" in flushed[-1], "flushed before the checkmarks were written"
+
+
+def test_verify_hook_bin_accepts_a_binary_that_runs():
+    """The happy path goes through a shell, because it is the quoting that broke, not the binary.
+    Any real interpreter answers `--help` with exit 0, so it stands in for a working install."""
+    assert _REAL_VERIFY(cli._hook_bin(cli.sys.executable)) is None
+
+
+def test_verify_hook_bin_reports_why_a_broken_binary_failed(tmp_path):
+    """A missing binary must come back as a reason string, not an exception or a bare False —
+    that string is what setup shows the user, so an empty one is a silent failure again."""
+    reason = _REAL_VERIFY(cli._hook_bin(str(tmp_path / "nope" / "engrim")))
+    assert isinstance(reason, str) and reason.strip()
 
 
 # ------------------------------------------------------------- project tags must not split in two

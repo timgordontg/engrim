@@ -53,15 +53,22 @@ _PROJECT_MARKERS = (".git", ".hg", ".svn", ".claude")
 def _git_root(start: str):
     """Walk up from `start` to the nearest project root (a dir with a _PROJECT_MARKER). None if none.
 
-    $HOME is NEVER treated as a project root: `~/.claude` (and a stray `~/.git`) exist for almost
-    everyone, so anchoring there would collapse every non-repo project under home into ONE bucket —
-    worse than the no-marker fallback. We skip the marker check AT home but keep walking past it, so a
-    real repo above home (unusual) still resolves while `~/.claude` can't become a catch-all anchor."""
-    home = os.path.realpath(os.path.expanduser("~"))
+    The walk STOPS AT $HOME and never climbs past it. `~/.claude` (and a stray `~/.git`) exist for
+    almost everyone, so anchoring AT home would collapse every non-repo project under it into ONE
+    bucket — worse than the no-marker fallback. Refusing to climb PAST home is what makes the tag
+    deterministic: it used to keep walking, so the answer depended on whatever happened to sit in
+    /home or C:\\Users on that particular machine, and a dev box with its own marker up there tagged
+    differently than a bare CI runner. A real repo above home no longer resolves and falls back to
+    the raw cwd tag — coarse, but never wrong, and that case needs a marker at /home or C:\\Users."""
+    # normcase, or the home guard fails open on Windows: `C:\Users\Tim` vs `c:/users/tim` are the same
+    # directory spelled two ways, and a missed match here is the exact collapse this guard prevents —
+    # every loose project under home in ONE bucket. No-op on POSIX, where case is significant.
+    home = os.path.normcase(os.path.realpath(os.path.expanduser("~")))
     cur = os.path.abspath(start)
     while True:
-        if os.path.realpath(cur) != home and \
-                any(os.path.exists(os.path.join(cur, m)) for m in _PROJECT_MARKERS):
+        if os.path.normcase(os.path.realpath(cur)) == home:
+            return None                 # home is not a root, and nothing above it is either
+        if any(os.path.exists(os.path.join(cur, m)) for m in _PROJECT_MARKERS):
             return cur
         parent = os.path.dirname(cur)
         if parent == cur:
@@ -1140,6 +1147,29 @@ def _cmd_has(command: str, marker: str) -> bool:
     return marker in norm.replace(".exe", "")
 
 
+def _verify_hook_bin(engrim_bin: str):
+    """Actually run the wired binary the way Claude Code will. Returns None if it works, else why not.
+
+    This is the missing feedback loop behind every silent Windows failure: the hook commands end in
+    `2>/dev/null || true` so a session is never broken by a bad hook, which also means a completely
+    non-functional install still prints a full column of green checkmarks. Setup is the one moment the
+    user is watching, so the checkmark gets earned here instead of assumed. Hooks run through bash on
+    every platform (Git Bash on Windows), so the check has to go through bash to be worth anything —
+    it is the shell quoting, not the binary, that broke."""
+    import subprocess              # local: `setup` runs once, the status line runs every refresh
+    shell = shutil.which("bash")
+    cmd = [shell, "-c", f"{engrim_bin} --help"] if shell else f"{engrim_bin} --help"
+    try:
+        p = subprocess.run(cmd, shell=not shell, capture_output=True, text=True,
+                           errors="replace", timeout=30)
+    except Exception as e:                       # no shell at all, or it couldn't be spawned
+        return f"couldn't run the command ({type(e).__name__}: {e})"
+    if p.returncode != 0:
+        detail = (p.stderr or p.stdout or "").strip().splitlines()
+        return (detail[-1] if detail else f"exit status {p.returncode}")
+    return None
+
+
 def cmd_setup(conn, a) -> None:
     """White-glove: wire the full SessionStart+SessionEnd loop into Claude Code settings.
 
@@ -1148,6 +1178,7 @@ def cmd_setup(conn, a) -> None:
     Together these keep the SQLite store and Claude Code's md memory in lockstep, session in/out."""
     settings_path = os.path.expanduser(a.settings or "~/.claude/settings.json")
     engrim_bin = _hook_bin(shutil.which("engrim") or "engrim")
+    bin_error = _verify_hook_bin(engrim_bin)   # before wiring: never claim a hook that can't run
     wired = {
         "SessionStart": (f"{engrim_bin} hook 2>/dev/null || true", "engrim hook"),
         "SessionEnd":   (f"{engrim_bin} sync --claude >/dev/null 2>&1 || true", "engrim sync"),
@@ -1163,8 +1194,22 @@ def cmd_setup(conn, a) -> None:
         try:
             with open(settings_path, encoding="utf-8") as f:   # never the Windows locale codec
                 settings = json.load(f)
-        except Exception as e:
+        except json.JSONDecodeError as e:
             sys.exit(f"settings.json exists but is not valid JSON ({e}). Fix it, then re-run.")
+        except OSError as e:
+            sys.exit(f"can't read {settings_path} ({e}). Fix the permissions, then re-run.")
+        # Anything else (a decode error under a legacy locale, say) must not be reported as bad JSON:
+        # blaming a file the user hasn't touched sends them to fix something that isn't broken.
+        except Exception as e:
+            sys.exit(f"couldn't load {settings_path} ({type(e).__name__}: {e}). "
+                     f"The file itself may be fine — please report this with the message above.")
+
+    if bin_error:
+        print(f"! the engrim command isn't runnable from a shell — {bin_error}\n"
+              f"    tried: {engrim_bin} --help\n"
+              f"  Wiring the hooks anyway, but they will do NOTHING until this resolves. Usually it\n"
+              f"  means engrim isn't on PATH for the shell Claude Code runs hooks in. Fix that, then\n"
+              f"  re-run `engrim setup` — it's safe to run again and won't duplicate anything.\n")
 
     hooks = settings.setdefault("hooks", {})
     changed = False
@@ -1240,6 +1285,14 @@ def cmd_setup(conn, a) -> None:
         else:
             print("• semantic recall unavailable (model2vec didn't load) — running pure-lexical for now")
 
+    if bin_error:   # last word, so it can't scroll past under the checkmarks
+        # sys.exit writes to stderr, which is unbuffered, while every checkmark above went to a
+        # stdout that is block-buffered whenever it isn't a terminal. Without this flush the final
+        # word lands FIRST under a pipe — correct-looking in a terminal, inverted everywhere else.
+        sys.stdout.flush()
+        sys.exit(f"\nNOT done — the hooks are written, but `{engrim_bin} --help` fails in a shell "
+                 f"({bin_error}),\nso every one of them will silently do nothing. Fix that and "
+                 f"re-run `engrim setup`.")
     print("\nDone. Open a NEW Claude Code session (or run /hooks to reload) and your project "
           "memory will auto-load. Try: engrim add -t fact -s \"hello world\" ; engrim context")
 
