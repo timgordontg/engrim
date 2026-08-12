@@ -10,7 +10,7 @@
           },
           {
             "type": "command",
-            "command": "[ -x \"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim ] && \"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim hook || true"
+            "command": "E=\"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim; [ -x \"$E\" ] || E=\"${CLAUDE_PLUGIN_DATA}\"/venv/Scripts/engrim.exe; [ -x \"$E\" ] && \"$E\" hook || true"
           }
         ]
       }
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -x \"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim ] && \"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim assist || true"
+            "command": "E=\"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim; [ -x \"$E\" ] || E=\"${CLAUDE_PLUGIN_DATA}\"/venv/Scripts/engrim.exe; [ -x \"$E\" ] && \"$E\" assist || true"
           }
         ]
       }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -x \"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim ] && \"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim log --hook || true"
+            "command": "E=\"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim; [ -x \"$E\" ] || E=\"${CLAUDE_PLUGIN_DATA}\"/venv/Scripts/engrim.exe; [ -x \"$E\" ] && \"$E\" log --hook || true"
           }
         ]
       }
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -x \"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim ] && \"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim sync --claude || true"
+            "command": "E=\"${CLAUDE_PLUGIN_DATA}\"/venv/bin/engrim; [ -x \"$E\" ] || E=\"${CLAUDE_PLUGIN_DATA}\"/venv/Scripts/engrim.exe; [ -x \"$E\" ] && \"$E\" sync --claude || true"
           }
         ]
       }
