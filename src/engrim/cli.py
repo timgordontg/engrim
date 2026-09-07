@@ -1472,6 +1472,8 @@ def cmd_setup(conn, a) -> None:
         getattr(a, "agy", False) or
         getattr(a, "claude", False) or
         getattr(a, "cursor", False) or
+        getattr(a, "codex", False) or
+        getattr(a, "codex", False) or
         getattr(a, "all", False) or
         getattr(a, "settings", None)
     )
@@ -1479,11 +1481,14 @@ def cmd_setup(conn, a) -> None:
     wire_agy = getattr(a, "agy", False) or getattr(a, "all", False)
     wire_claude = getattr(a, "claude", False) or getattr(a, "all", False) or bool(getattr(a, "settings", None))
     wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
+    wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
+    wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
 
     if not explicit:
         gemini_dir = os.path.expanduser("~/.gemini")
         claude_dir = os.path.expanduser("~/.claude")
         cursor_dir = os.path.expanduser("~/.cursor")
+        codex_dir = os.path.expanduser("~/.codex")
         detected = []
         if os.path.isdir(gemini_dir):
             wire_agy = True
@@ -1494,12 +1499,15 @@ def cmd_setup(conn, a) -> None:
         if os.path.isdir(cursor_dir):
             wire_cursor = True
             detected.append("Cursor (~/.cursor)")
+        if os.path.isdir(codex_dir):
+            wire_codex = True
+            detected.append("Codex CLI (~/.codex)")
 
         if detected:
             print(f"Auto-detected environments: {', '.join(detected)}")
         else:
-            print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor).")
-            print("Defaulting to Claude Code setup. (Use --agy, --cursor, or --all to wire others).")
+            print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor, ~/.codex).")
+            print("Defaulting to Claude Code setup. (Use --agy, --cursor, --codex, or --all to wire others).")
             wire_claude = True
 
     if wire_agy:
@@ -1508,6 +1516,8 @@ def cmd_setup(conn, a) -> None:
         _setup_claude(conn, a, engrim_bin, dry_run=dry_run)
     if wire_cursor:
         _setup_cursor(engrim_bin, dry_run=dry_run)
+    if wire_codex:
+        _setup_codex(engrim_bin, dry_run=dry_run)
 
     if not dry_run and os.environ.get("ENGRIM_EMBED", "").strip().lower() not in ("0", "off", "none", "false", "no", "lexical"):
         print("\nPreparing semantic recall (first run downloads a small embedding model)…")
@@ -1545,6 +1555,176 @@ def cmd_setup(conn, a) -> None:
               "memory will auto-load. Try: engrim add -t fact -s \"hello world\" ; engrim context")
 
     print("\nUniversal memory setup complete.")
+
+
+
+def cmd_uninstall(conn, a) -> None:
+    """Universal multi-agent uninstall: Antigravity, Claude Code, and Cursor."""
+    dry_run = getattr(a, "dry_run", False)
+    explicit = bool(
+        getattr(a, "agy", False) or
+        getattr(a, "claude", False) or
+        getattr(a, "cursor", False) or
+        getattr(a, "all", False) or
+        getattr(a, "settings", None)
+    )
+
+    wire_agy = getattr(a, "agy", False) or getattr(a, "all", False)
+    wire_claude = getattr(a, "claude", False) or getattr(a, "all", False) or bool(getattr(a, "settings", None))
+    wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
+
+    if not explicit:
+        gemini_dir = os.path.expanduser("~/.gemini")
+        claude_dir = os.path.expanduser("~/.claude")
+        cursor_dir = os.path.expanduser("~/.cursor")
+        codex_dir = os.path.expanduser("~/.codex")
+        detected = []
+        if os.path.isdir(gemini_dir):
+            wire_agy = True
+            detected.append("Antigravity (~/.gemini)")
+        if os.path.isdir(claude_dir):
+            wire_claude = True
+            detected.append("Claude Code (~/.claude)")
+        if os.path.isdir(cursor_dir):
+            wire_cursor = True
+            detected.append("Cursor (~/.cursor)")
+        if os.path.isdir(codex_dir):
+            wire_codex = True
+            detected.append("Codex CLI (~/.codex)")
+
+        if detected:
+            print(f"Auto-detected environments: {', '.join(detected)}")
+        else:
+            print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor, ~/.codex).")
+            print("Defaulting to Claude Code uninstall. (Use --agy, --cursor, --codex, or --all to specify others).")
+            wire_claude = True
+
+    if wire_agy:
+        _uninstall_agy(dry_run=dry_run)
+    if wire_claude:
+        _uninstall_claude(a, dry_run=dry_run)
+    if wire_cursor:
+        _uninstall_cursor(dry_run=dry_run)
+    if wire_codex:
+        _uninstall_codex(dry_run=dry_run)
+        
+    print("\nUniversal memory uninstall complete.")
+
+def _uninstall_agy(dry_run: bool = False) -> None:
+    print("Unwiring Google Antigravity environment…")
+    hooks_path = os.path.expanduser("~/.gemini/config/hooks.json")
+    if dry_run:
+        print(f"[dry-run] Would unwire Antigravity hooks in {hooks_path}")
+    else:
+        if os.path.exists(hooks_path):
+            with open(hooks_path, "r", encoding="utf-8") as f:
+                hooks_data = json.load(f)
+            if "engrim" in hooks_data:
+                del hooks_data["engrim"]
+                tmp = hooks_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(hooks_data, f, indent=2)
+                os.replace(tmp, hooks_path)
+                print(f"✓ unwired PreInvocation & Stop hooks in {hooks_path}")
+            else:
+                print(f"✓ hooks already unwired in {hooks_path}")
+
+    skill_dir = os.path.expanduser("~/.gemini/config/skills/engrim")
+    if dry_run:
+        print(f"[dry-run] Would remove Antigravity skill directory {skill_dir}")
+    else:
+        if os.path.exists(skill_dir):
+            shutil.rmtree(skill_dir, ignore_errors=True)
+            print(f"✓ removed Antigravity skill directory {skill_dir}")
+        else:
+            print(f"✓ skill already removed {skill_dir}")
+
+    mcp_paths = [
+        os.path.expanduser("~/.gemini/antigravity-cli/mcp_config.json"),
+        os.path.expanduser("~/.gemini/config/mcp_config.json"),
+    ]
+    for mp in mcp_paths:
+        if dry_run:
+            print(f"[dry-run] Would remove MCP server from {mp}")
+        else:
+            if os.path.exists(mp):
+                with open(mp, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                servers = cfg.get("mcpServers", {})
+                if "engrim" in servers:
+                    del servers["engrim"]
+                    tmp = mp + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, indent=2)
+                    os.replace(tmp, mp)
+                    print(f"✓ removed MCP server from {mp}")
+                else:
+                    print(f"✓ MCP server already removed from {mp}")
+
+def _uninstall_cursor(dry_run: bool = False) -> None:
+    print("Unwiring Cursor MCP environment…")
+    cursor_mcp = os.path.expanduser("~/.cursor/mcp.json")
+    if dry_run:
+        print(f"[dry-run] Would remove engrim from {cursor_mcp}")
+    else:
+        if os.path.exists(cursor_mcp):
+            with open(cursor_mcp, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            servers = cfg.get("mcpServers", {})
+            if "engrim" in servers:
+                del servers["engrim"]
+                tmp = cursor_mcp + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=2)
+                os.replace(tmp, cursor_mcp)
+                print(f"✓ removed Cursor MCP entry from {cursor_mcp}")
+            else:
+                print(f"✓ Cursor MCP entry already removed from {cursor_mcp}")
+
+def _uninstall_claude(a, dry_run: bool = False) -> None:
+    print("Unwiring Claude Code environment…")
+    settings_path = os.path.expanduser(getattr(a, "settings", None) or "~/.claude/settings.json")
+    if dry_run:
+        print(f"[dry-run] Would unwire Claude Code hooks in {settings_path}")
+        return
+
+    if os.path.exists(settings_path):
+        with open(settings_path, encoding="utf-8") as f:
+            settings = json.load(f)
+        hooks = settings.get("hooks", {})
+        changed = False
+        
+        events = ["SessionStart", "SessionEnd", "Stop", "UserPromptSubmit"]
+        for event in events:
+            if event in hooks:
+                groups = hooks[event]
+                new_groups = []
+                for grp in groups:
+                    new_hooks = [h for h in grp.get("hooks", []) if not _cmd_has(h.get("command", ""), "engrim")]
+                    if len(new_hooks) != len(grp.get("hooks", [])):
+                        changed = True
+                    if new_hooks:
+                        grp["hooks"] = new_hooks
+                        new_groups.append(grp)
+                if len(new_groups) != len(groups):
+                    changed = True
+                hooks[event] = new_groups
+                if not hooks[event]:
+                    del hooks[event]
+                    
+        sl = settings.get("statusLine")
+        if isinstance(sl, dict) and _cmd_has(sl.get("command", ""), "engrim"):
+            del settings["statusLine"]
+            changed = True
+            
+        if changed:
+            tmp = settings_path + ".engrim-tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2)
+            os.replace(tmp, settings_path)
+            print(f"✓ unwired hooks and status line from {settings_path}")
+        else:
+            print(f"✓ hooks and status line already unwired from {settings_path}")
 
 
 _IMPORT_TYPE_MAP = {
@@ -2462,13 +2642,33 @@ def build_parser() -> argparse.ArgumentParser:
                      help="wire Claude Code SessionStart/Stop hooks and CLAUDE.md")
     pse.add_argument("--cursor", dest="cursor", action="store_true",
                      help="add engrim MCP entry to Cursor mcp.json")
+    pse.add_argument("--codex", dest="codex", action="store_true",
+                     help="wire Codex CLI hooks and MCP")
     pse.add_argument("--all", dest="all", action="store_true",
                      help="configure all detected agent environments")
     pse.add_argument("--dry-run", action="store_true",
                      help="display planned configurations without modifying disk")
     pse.add_argument("--settings", help="path to settings.json (default ~/.claude/settings.json)")
+    
     pse.add_argument("--no-claude-md", action="store_true", help="don't touch ~/.claude/CLAUDE.md")
     pse.set_defaults(func=cmd_setup)
+
+    pun = sub.add_parser("uninstall", help="remove engrim from agent environments (Antigravity, Claude, Cursor)")
+    pun.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
+                     help="remove Antigravity hooks, skill, and MCP server")
+    pun.add_argument("--claude", dest="claude", action="store_true",
+                     help="remove Claude Code hooks and statusLine")
+    pun.add_argument("--cursor", dest="cursor", action="store_true",
+                     help="remove engrim MCP entry from Cursor mcp.json")
+    pun.add_argument("--codex", dest="codex", action="store_true",
+                     help="remove Codex CLI hooks and MCP")
+    pun.add_argument("--all", dest="all", action="store_true",
+                     help="remove from all detected agent environments")
+    pun.add_argument("--dry-run", action="store_true",
+                     help="display planned configurations without modifying disk")
+    pun.add_argument("--settings", help="path to settings.json (default ~/.claude/settings.json)")
+    pun.set_defaults(func=cmd_uninstall)
+
 
     pi = sub.add_parser("import")
     pi.add_argument("path", help="a markdown file or a directory tree to import (one record per file)")
