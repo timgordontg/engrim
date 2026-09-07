@@ -3,8 +3,11 @@ asserts the responses, with no MCP client or network needed."""
 import io
 import json
 import sqlite3
+from contextlib import closing
 
-from engrim.cli import connect
+import pytest
+
+from engrim.cli import add_memory, connect
 from engrim.mcp_server import serve, TOOLS
 
 
@@ -79,3 +82,76 @@ def test_unknown_tool_and_bad_args_are_in_band_errors(tmp_path):
     assert resp[0]["error"]["code"] == -32602                # unknown tool -> JSON-RPC error
     assert resp[1]["result"]["isError"] is True              # bad tool args -> in-band tool error
     assert "type must be one of" in resp[1]["result"]["content"][0]["text"]
+
+
+def _review(conn, project="/p"):
+    response = _run(conn, [{
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "engrim_review", "arguments": {"project": project}},
+    }])[0]
+    assert "error" not in response
+    assert not response["result"].get("isError", False)
+    return json.loads(response["result"]["content"][0]["text"])
+
+
+def _log_turn(conn, project, content):
+    conn.execute(
+        "INSERT INTO log(ts, project, session, role, content) VALUES(?,?,?,?,?)",
+        ("2026-09-07T12:00:00", project, "review-test", "user", content),
+    )
+    conn.commit()
+
+
+@pytest.mark.parametrize("has_memory", [False, True])
+@pytest.mark.parametrize("other_project_logged", [False, True])
+def test_review_without_project_transcript_is_unknown(tmp_path, has_memory, other_project_logged):
+    with closing(connect(str(tmp_path / "m.db"))) as conn:
+        if has_memory:
+            add_memory(conn, project="/p", type="decision",
+                       summary="We decided to use Redis for session storage.")
+        if other_project_logged:
+            _log_turn(conn, "/other", "We decided to use Redis for session storage.")
+
+        result = _review(conn)
+
+    assert result["safe_to_clear"] is None
+    assert result["total_log_turns"] == 0
+    assert result["scanned_turns"] == 0
+    assert result["active_curated"] == int(has_memory)
+    assert result["uncaptured_count"] == 0
+    assert result["uncaptured"] == []
+    assert "insufficient evidence" in result["message"].lower()
+
+
+@pytest.mark.parametrize("captured", [False, True])
+def test_review_with_logged_decision_has_a_boolean_verdict(tmp_path, captured):
+    decision = "We decided to use Redis for session storage."
+    with closing(connect(str(tmp_path / "m.db"))) as conn:
+        _log_turn(conn, "/p", decision)
+        if captured:
+            add_memory(conn, project="/p", type="decision", summary=decision)
+
+        result = _review(conn)
+
+    assert result["safe_to_clear"] is captured
+    assert result["total_log_turns"] == result["scanned_turns"] == 1
+    assert result["uncaptured_count"] == int(not captured)
+    assert [item["summary"] for item in result["uncaptured"]] == ([] if captured else [decision])
+
+
+def test_review_reassesses_after_logging_starts(tmp_path):
+    decision = "We decided to use Redis for session storage."
+    with closing(connect(str(tmp_path / "m.db"))) as conn:
+        assert _review(conn)["safe_to_clear"] is None
+
+        # Saving a memory does not establish what happened in the unlogged session.
+        add_memory(conn, project="/p", type="decision", summary=decision)
+        assert _review(conn)["safe_to_clear"] is None
+
+        _log_turn(conn, "/p", decision)
+        assert _review(conn)["safe_to_clear"] is True
+
+        _log_turn(conn, "/p", "We chose Postgres for billing.")
+        result = _review(conn)
+        assert result["safe_to_clear"] is False
+        assert result["uncaptured_count"] == 1
