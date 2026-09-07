@@ -35,8 +35,39 @@ import sys
 DEFAULT_DB = os.path.expanduser("~/.engrim/memory.db")
 TYPES = ("decision", "fact", "feedback", "state", "reference", "user")
 STATUSES = ("active", "superseded", "done")
+ORIGIN_AGENTS = ("antigravity", "claude-code", "cursor", "cli", "user")
 # priority for the session-boot pack: how-to-work-with-user first, then state, then the rest
 _PRIO = {"user": 0, "feedback": 1, "state": 2, "decision": 3, "fact": 4, "reference": 5}
+
+
+def _norm_agent(agent: str | None) -> str | None:
+    if not agent:
+        return None
+    a = agent.strip().lower()
+    if a in ("agy", "antigravity", "gemini"):
+        return "antigravity"
+    if a in ("claude", "claude_code", "claude-code"):
+        return "claude-code"
+    if a == "cursor":
+        return "cursor"
+    if a == "cli":
+        return "cli"
+    if a == "user":
+        return "user"
+    return a
+
+
+def _agent_display(agent: str | None) -> str:
+    if not agent:
+        return ""
+    m = {
+        "antigravity": "Antigravity",
+        "claude-code": "Claude Code",
+        "cursor": "Cursor",
+        "cli": "CLI",
+        "user": "User",
+    }
+    return m.get(agent.lower(), agent.title())
 
 
 def _now() -> str:
@@ -190,7 +221,8 @@ def _init(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS memories (
             id INTEGER PRIMARY KEY, ts TEXT NOT NULL, project TEXT NOT NULL,
             type TEXT NOT NULL, summary TEXT NOT NULL, detail TEXT,
-            status TEXT NOT NULL DEFAULT 'active', tags TEXT, links TEXT, source TEXT
+            status TEXT NOT NULL DEFAULT 'active', tags TEXT, links TEXT, source TEXT,
+            origin_agent TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_mem_project ON memories(project, status, ts);
         CREATE TABLE IF NOT EXISTS engrim_meta (
@@ -209,6 +241,13 @@ def _init(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    # Migrate older `memories` tables without origin_agent column
+    cols_mem = {r[1] for r in conn.execute("PRAGMA table_info(memories)")}
+    if "origin_agent" not in cols_mem:
+        try:
+            conn.execute("ALTER TABLE memories ADD COLUMN origin_agent TEXT")
+        except sqlite3.OperationalError:
+            pass
     # Migrate older `log` tables (pre-raw column / global-unique msg_uuid) without losing rows.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(log)")}
     if "raw" not in cols:
@@ -274,17 +313,18 @@ def _meta_set(conn, project, key, value):
 
 
 def add_memory(conn, *, project, type, summary, detail=None, status="active",
-               tags=None, links=None, source=None) -> int:
+               tags=None, links=None, source=None, origin_agent=None) -> int:
     """Insert one memory record and best-effort auto-embed it; return the new id.
 
     The shared write core behind both the `add` CLI command and the MCP server, so a
     record created either way is identical and immediately searchable by meaning.
     `tags`/`links` are lists (already normalized by the caller)."""
+    origin_agent = _norm_agent(origin_agent or os.environ.get("ENGRIM_ORIGIN_AGENT"))
     cur = conn.execute(
-        "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source,origin_agent) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
         (_now(), project, type, summary, detail, status,
-         json.dumps(tags or []), json.dumps(links or []), source),
+         json.dumps(tags or []), json.dumps(links or []), source, origin_agent),
     )
     conn.commit()
     # Auto-embed so the record is searchable by meaning immediately — no manual `engrim embed` step.
@@ -306,16 +346,19 @@ def cmd_add(conn, a) -> None:
         sys.exit("--summary cannot be empty")
     # --global writes to the user-layer that loads in every project; otherwise scope to the cwd's project.
     project = GLOBAL_PROJECT if getattr(a, "globl", False) else _resolve_project(a.project)
+    origin_agent = getattr(a, "origin_agent", None) or os.environ.get("ENGRIM_ORIGIN_AGENT") or "cli"
     new_id = add_memory(conn, project=project, type=a.type, summary=a.summary,
                         detail=a.detail, status=a.status,
-                        tags=_csv(a.tags), links=_csv(a.links), source=a.source)
+                        tags=_csv(a.tags), links=_csv(a.links), source=a.source,
+                        origin_agent=origin_agent)
     shown = "global · loads in every project" if project == GLOBAL_PROJECT else project
     print(f"+ #{new_id} [{a.type}] {shown}\n  {a.summary}")
 
 
 def _row_line(r, detail: bool) -> str:
     tags = ", ".join(json.loads(r["tags"] or "[]"))
-    head = f"#{r['id']} [{r['type']}/{r['status']}] {r['ts'][:16]}  {r['summary']}"
+    via = f" (via {_agent_display(r['origin_agent'])})" if ("origin_agent" in r.keys() and r["origin_agent"]) else ""
+    head = f"#{r['id']} [{r['type']}/{r['status']}]{via} {r['ts'][:16]}  {r['summary']}"
     if tags:
         head += f"   ({tags})"
     if detail and r["detail"]:
@@ -966,7 +1009,10 @@ def cmd_context(conn, a) -> None:
         def _line(r, summ):
             tags = ", ".join(json.loads(r["tags"] or "[]"))
             gtag = "  · global" if r["project"] == GLOBAL_PROJECT else ""   # rides along in every project
-            print(f"- #{r['id']} {summ}" + (f"  ({tags})" if tags else "") + gtag)
+            via = f" (via {_agent_display(r['origin_agent'])})" if ("origin_agent" in r.keys() and r["origin_agent"]) else ""
+            type_tag = f" [{r['type'].upper()}]" if via else ""
+            colon = ":" if via else ""
+            print(f"- #{r['id']}{type_tag}{via}{colon} {summ}" + (f"  ({tags})" if tags else "") + gtag)
 
         # The resume cursor leads, in its own section, so a fresh session reads "where we left off" first.
         cursor = next(((r, s) for r, s in picked if _is_resume(r)), None)
@@ -1023,6 +1069,18 @@ def cmd_context(conn, a) -> None:
 
 
 def cmd_hook(conn, a) -> None:
+    agent = getattr(a, "agent", "claude") or "claude"
+    if agent in ("agy", "antigravity"):
+        from engrim.adapters.agy import handle_boot, handle_stop
+        event = getattr(a, "event", None) or "boot"
+        if event == "boot":
+            handle_boot(db_path=getattr(a, "db", None))
+        elif event == "stop":
+            handle_stop(db_path=getattr(a, "db", None))
+        else:
+            sys.exit(f"Unknown event {event} for agent {agent}")
+        return
+
     import contextlib
     import io
     # ONE-TIME context build: the very first session for a project seeds the store from Claude
@@ -1170,36 +1228,185 @@ def _verify_hook_bin(engrim_bin: str):
     return None
 
 
-def cmd_setup(conn, a) -> None:
-    """White-glove: wire the full SessionStart+SessionEnd loop into Claude Code settings.
+CANONICAL_AGY_SKILL = """---
+name: engrim
+description: Cross-session memory and context continuity for heavy, long-horizon work. Use to recall prior decisions, facts, feedback, and architecture rationale, or to save new durable project decisions across session clears.
+---
 
-    SessionStart `engrim hook`  -> mirror file-memory in, then inject the boot pack (start oriented).
-    SessionEnd  `engrim sync --claude` -> mirror the session's file-memory writes into the store.
-    Together these keep the SQLite store and Claude Code's md memory in lockstep, session in/out."""
-    settings_path = os.path.expanduser(a.settings or "~/.claude/settings.json")
-    engrim_bin = _hook_bin(shutil.which("engrim") or "engrim")
-    bin_error = _verify_hook_bin(engrim_bin)   # before wiring: never claim a hook that can't run
+# Engrim: Cross-Session Memory & Context Continuity
+
+Engrim provides persistent, project-scoped memory across agent sessions. It allows you to externalize architectural decisions, facts, and milestones so you can clear context freely without losing the "why" behind past decisions.
+
+---
+
+## Direct MCP Tools (Recommended)
+
+When Engrim MCP server is active, use these tools directly:
+
+- `engrim_recall(query, project="auto", k=5, type=None)`:
+  Run hybrid (keyword + semantic) search over project memory.
+- `engrim_context(project="auto", budget=4000)`:
+  Fetch the session-boot memory pack (high-signal active records).
+- `engrim_add(type, summary, detail=None, tags=[])`:
+  Save a durable record into Engrim memory.
+  `type` must be one of: `decision`, `fact`, `feedback`, `state`, `user`, `reference`.
+- `engrim_review(project="auto")`:
+  Check coverage before clearing context: surface recent decisions from the transcript log.
+
+---
+
+## CLI Commands
+
+You can also run Engrim via `run_command` in bash:
+
+```bash
+# Add a durable decision
+engrim add -t decision -s "Chose Postgres over Mongo" --tags db
+
+# Query memory for relevant records
+engrim recall -q "database architecture"
+
+# View active boot pack context
+engrim context
+
+# Check if recent decisions are safe before clearing
+engrim review
+
+# Perform doctor health check
+engrim doctor
+```
+
+---
+
+## Session Continuity Best Practices
+
+1. **Capture as you work**: Whenever a major decision, architecture choice, or milestone is established, call `engrim_add` (or `engrim add`).
+2. **Use `resume-pointer`**: Before clearing context or wrapping up a session, add a record tagged `resume-pointer` summarizing the immediate next step. The newest `resume-pointer` will be pinned to the top of the next session's boot pack!
+3. **Clear freely**: Once decisions are in Engrim, context can be safely cleared (`/clear`), as Engrim will inject the active memory pack at the start of the next session.
+"""
+
+
+def _setup_agy(engrim_bin: str, dry_run: bool = False) -> None:
+    print("Wiring Google Antigravity environment…")
+    hooks_path = os.path.expanduser("~/.gemini/config/hooks.json")
+    boot_cmd = f"{engrim_bin} hook --agent agy --event boot 2>/dev/null || true"
+    stop_cmd = f"{engrim_bin} hook --agent agy --event stop >/dev/null 2>&1 || true"
+    if dry_run:
+        print(f"[dry-run] Would wire Antigravity hooks in {hooks_path}:")
+        print(f"    PreInvocation: {boot_cmd}")
+        print(f"    Stop:          {stop_cmd}")
+    else:
+        os.makedirs(os.path.dirname(hooks_path), exist_ok=True)
+        hooks_data = {}
+        if os.path.exists(hooks_path):
+            try:
+                with open(hooks_path, "r", encoding="utf-8") as f:
+                    hooks_data = json.load(f)
+            except Exception:
+                hooks_data = {}
+        engrim_entry = hooks_data.setdefault("engrim", {})
+        engrim_entry["PreInvocation"] = [{"type": "command", "command": boot_cmd, "timeout": 30}]
+        engrim_entry["Stop"] = [{"type": "command", "command": stop_cmd, "timeout": 30}]
+        tmp = hooks_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(hooks_data, f, indent=2)
+        os.replace(tmp, hooks_path)
+        print(f"✓ wired PreInvocation & Stop hooks in {hooks_path}")
+
+    skill_path = os.path.expanduser("~/.gemini/config/skills/engrim/SKILL.md")
+    if dry_run:
+        print(f"[dry-run] Would deploy canonical Antigravity skill to {skill_path}")
+    else:
+        os.makedirs(os.path.dirname(skill_path), exist_ok=True)
+        tmp = skill_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(CANONICAL_AGY_SKILL)
+        os.replace(tmp, skill_path)
+        print(f"✓ deployed canonical Antigravity skill to {skill_path}")
+
+    mcp_paths = [
+        os.path.expanduser("~/.gemini/antigravity-cli/mcp_config.json"),
+        os.path.expanduser("~/.gemini/config/mcp_config.json"),
+    ]
+    raw_bin = engrim_bin.strip('"')
+    mcp_entry = {
+        "command": raw_bin,
+        "args": ["serve", "--mcp"],
+    }
+    for mp in mcp_paths:
+        if dry_run:
+            print(f"[dry-run] Would register MCP server in {mp}")
+        else:
+            os.makedirs(os.path.dirname(mp), exist_ok=True)
+            cfg = {}
+            if os.path.exists(mp):
+                try:
+                    with open(mp, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+            servers = cfg.setdefault("mcpServers", {})
+            servers["engrim"] = mcp_entry
+            tmp = mp + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            os.replace(tmp, mp)
+            print(f"✓ registered MCP server in {mp}")
+
+
+def _setup_cursor(engrim_bin: str, dry_run: bool = False) -> None:
+    print("Wiring Cursor MCP environment…")
+    cursor_mcp = os.path.expanduser("~/.cursor/mcp.json")
+    raw_bin = engrim_bin.strip('"')
+    mcp_entry = {
+        "command": raw_bin,
+        "args": ["serve", "--mcp"],
+    }
+    if dry_run:
+        print(f"[dry-run] Would register engrim in {cursor_mcp}")
+    else:
+        os.makedirs(os.path.dirname(cursor_mcp), exist_ok=True)
+        cfg = {}
+        if os.path.exists(cursor_mcp):
+            try:
+                with open(cursor_mcp, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            except Exception:
+                cfg = {}
+        servers = cfg.setdefault("mcpServers", {})
+        servers["engrim"] = mcp_entry
+        tmp = cursor_mcp + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, cursor_mcp)
+        print(f"✓ registered Cursor MCP entry in {cursor_mcp}")
+
+
+def _setup_claude(conn, a, engrim_bin: str, dry_run: bool = False) -> None:
+    print("Wiring Claude Code environment…")
+    settings_path = os.path.expanduser(getattr(a, "settings", None) or "~/.claude/settings.json")
+    bin_error = _verify_hook_bin(engrim_bin)
     wired = {
         "SessionStart": (f"{engrim_bin} hook 2>/dev/null || true", "engrim hook"),
         "SessionEnd":   (f"{engrim_bin} sync --claude >/dev/null 2>&1 || true", "engrim sync"),
-        # Tail the transcript into the append-only log after each turn — cheap, never loaded.
         "Stop":         (f"{engrim_bin} log --hook >/dev/null 2>&1 || true", "engrim log"),
-        # The minder: auto-inject the relevant db slice for each prompt (top-k, budget-capped).
         "UserPromptSubmit": (f"{engrim_bin} assist 2>/dev/null || true", "engrim assist"),
     }
+
+    if dry_run:
+        print(f"[dry-run] Would wire Claude Code hooks in {settings_path}")
+        return
 
     os.makedirs(os.path.dirname(settings_path), exist_ok=True)
     settings = {}
     if os.path.exists(settings_path):
         try:
-            with open(settings_path, encoding="utf-8") as f:   # never the Windows locale codec
+            with open(settings_path, encoding="utf-8") as f:
                 settings = json.load(f)
         except json.JSONDecodeError as e:
             sys.exit(f"settings.json exists but is not valid JSON ({e}). Fix it, then re-run.")
         except OSError as e:
             sys.exit(f"can't read {settings_path} ({e}). Fix the permissions, then re-run.")
-        # Anything else (a decode error under a legacy locale, say) must not be reported as bad JSON:
-        # blaming a file the user hasn't touched sends them to fix something that isn't broken.
         except Exception as e:
             sys.exit(f"couldn't load {settings_path} ({type(e).__name__}: {e}). "
                      f"The file itself may be fine — please report this with the message above.")
@@ -1207,9 +1414,7 @@ def cmd_setup(conn, a) -> None:
     if bin_error:
         print(f"! the engrim command isn't runnable from a shell — {bin_error}\n"
               f"    tried: {engrim_bin} --help\n"
-              f"  Wiring the hooks anyway, but they will do NOTHING until this resolves. Usually it\n"
-              f"  means engrim isn't on PATH for the shell Claude Code runs hooks in. Fix that, then\n"
-              f"  re-run `engrim setup` — it's safe to run again and won't duplicate anything.\n")
+              f"  Wiring the hooks anyway, but they will do NOTHING until this resolves.\n")
 
     hooks = settings.setdefault("hooks", {})
     changed = False
@@ -1224,8 +1429,6 @@ def cmd_setup(conn, a) -> None:
             changed = True
             print(f"✓ wired {event} hook\n    {cmd}")
 
-    # Ambient status line: shows engrim is live + working in the status bar, never in the chat — so the
-    # user sees the benefit without being interrupted (the answer to "is this thing even doing anything?").
     sl, sl_cmd = settings.get("statusLine"), f"{engrim_bin} statusline"
     if isinstance(sl, dict) and _cmd_has(sl.get("command") or "", "engrim"):
         print("✓ status line already shows engrim")
@@ -1240,27 +1443,73 @@ def cmd_setup(conn, a) -> None:
         tmp = settings_path + ".engrim-tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
-        os.replace(tmp, settings_path)  # atomic: never leave a half-written settings.json
+        os.replace(tmp, settings_path)
 
-    if not a.no_claude_md:
+    if not getattr(a, "no_claude_md", False):
         md_path = os.path.expanduser("~/.claude/CLAUDE.md")
         existing = ""
         if os.path.exists(md_path):
             with open(md_path, encoding="utf-8", errors="replace") as f:
-                existing = f.read()   # a CLAUDE.md full of emoji must not crash setup on Windows
+                existing = f.read()
         if "engrim" in existing and "Project Memory" in existing:
             print(f"✓ CLAUDE.md already mentions engrim ({md_path})")
         else:
+            os.makedirs(os.path.dirname(md_path), exist_ok=True)
             with open(md_path, "a", encoding="utf-8") as f:
                 if existing and not existing.endswith("\n"):
                     f.write("\n")
                 f.write("\n" + CLAUDE_MD_BLOCK)
             print(f"✓ added usage note to {md_path}")
 
-    # Warm the semantic backend now — a visible, one-time model fetch in a command the user is watching,
-    # so session hooks never cold-download mid-prompt. Then embed this project's existing records so the
-    # minder ranks by meaning from the very first session. All best-effort; never blocks setup.
-    if os.environ.get("ENGRIM_EMBED", "").strip().lower() not in ("0", "off", "none", "false", "no", "lexical"):
+
+def cmd_setup(conn, a) -> None:
+    """Universal multi-agent setup: Antigravity, Claude Code, and Cursor."""
+    engrim_bin = _hook_bin(shutil.which("engrim") or "engrim")
+    dry_run = getattr(a, "dry_run", False)
+    bin_error = _verify_hook_bin(engrim_bin)
+
+    explicit = bool(
+        getattr(a, "agy", False) or
+        getattr(a, "claude", False) or
+        getattr(a, "cursor", False) or
+        getattr(a, "all", False) or
+        getattr(a, "settings", None)
+    )
+
+    wire_agy = getattr(a, "agy", False) or getattr(a, "all", False)
+    wire_claude = getattr(a, "claude", False) or getattr(a, "all", False) or bool(getattr(a, "settings", None))
+    wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
+
+    if not explicit:
+        gemini_dir = os.path.expanduser("~/.gemini")
+        claude_dir = os.path.expanduser("~/.claude")
+        cursor_dir = os.path.expanduser("~/.cursor")
+        detected = []
+        if os.path.isdir(gemini_dir):
+            wire_agy = True
+            detected.append("Antigravity (~/.gemini)")
+        if os.path.isdir(claude_dir):
+            wire_claude = True
+            detected.append("Claude Code (~/.claude)")
+        if os.path.isdir(cursor_dir):
+            wire_cursor = True
+            detected.append("Cursor (~/.cursor)")
+
+        if detected:
+            print(f"Auto-detected environments: {', '.join(detected)}")
+        else:
+            print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor).")
+            print("Defaulting to Claude Code setup. (Use --agy, --cursor, or --all to wire others).")
+            wire_claude = True
+
+    if wire_agy:
+        _setup_agy(engrim_bin, dry_run=dry_run)
+    if wire_claude:
+        _setup_claude(conn, a, engrim_bin, dry_run=dry_run)
+    if wire_cursor:
+        _setup_cursor(engrim_bin, dry_run=dry_run)
+
+    if not dry_run and os.environ.get("ENGRIM_EMBED", "").strip().lower() not in ("0", "off", "none", "false", "no", "lexical"):
         print("\nPreparing semantic recall (first run downloads a small embedding model)…")
         fn, name = _resolve_embedder()
         if fn:
@@ -1285,16 +1534,17 @@ def cmd_setup(conn, a) -> None:
         else:
             print("• semantic recall unavailable (model2vec didn't load) — running pure-lexical for now")
 
-    if bin_error:   # last word, so it can't scroll past under the checkmarks
-        # sys.exit writes to stderr, which is unbuffered, while every checkmark above went to a
-        # stdout that is block-buffered whenever it isn't a terminal. Without this flush the final
-        # word lands FIRST under a pipe — correct-looking in a terminal, inverted everywhere else.
+    if wire_claude and bin_error and not dry_run:
         sys.stdout.flush()
         sys.exit(f"\nNOT done — the hooks are written, but `{engrim_bin} --help` fails in a shell "
                  f"({bin_error}),\nso every one of them will silently do nothing. Fix that and "
                  f"re-run `engrim setup`.")
-    print("\nDone. Open a NEW Claude Code session (or run /hooks to reload) and your project "
-          "memory will auto-load. Try: engrim add -t fact -s \"hello world\" ; engrim context")
+
+    if wire_claude and not dry_run:
+        print("\nDone. Open a NEW Claude Code session (or run /hooks to reload) and your project "
+              "memory will auto-load. Try: engrim add -t fact -s \"hello world\" ; engrim context")
+
+    print("\nUniversal memory setup complete.")
 
 
 _IMPORT_TYPE_MAP = {
@@ -1361,10 +1611,10 @@ def cmd_import(conn, a) -> None:
             continue
         tags = [t for t in re.split(r"[_\-.]", name) if len(t) > 1][:6]
         conn.execute(
-            "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source,origin_agent) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (_now(), project, typ, summary, body, "active",
-             json.dumps(tags), json.dumps([]), "import:" + base),
+             json.dumps(tags), json.dumps([]), "import:" + base, "cli"),
         )
         existing.add(summary)
         added += 1
@@ -1481,10 +1731,10 @@ def _do_sync(conn, project, path, hub="MEMORY.md", exclude=None, dry_run=False, 
             plan.append(("ADD", source, summary))
             if not dry_run:
                 conn.execute(
-                    "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source)"
-                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source,origin_agent)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (_now(), project, typ, summary, detail, "active",
-                     json.dumps(tags), json.dumps([]), source))
+                     json.dumps(tags), json.dumps([]), source, "claude-code"))
             added += 1
         elif (row["summary"], row["detail"], row["type"], row["source"]) != (summary, detail, typ, source):
             plan.append(("UPD", source, summary))
@@ -1685,18 +1935,32 @@ def _ingest_transcript(conn, project, path, session=None, include_thinking=False
                 o = json.loads(line)
             except ValueError:
                 continue
-            if o.get("type") not in ("user", "assistant"):
+            otype = o.get("type")
+            osource = o.get("source")
+            if otype in ("user", "assistant"):
+                role = otype
+                msg = o.get("message") or {}
+                text = _extract_text(msg.get("content"), include_thinking)
+                uuid = o.get("uuid")
+                ts = o.get("timestamp") or _now()
+                sess = o.get("sessionId") or session
+            elif otype in ("USER_INPUT", "PLANNER_RESPONSE") or osource in ("USER_EXPLICIT", "MODEL"):
+                role = "user" if (otype == "USER_INPUT" or osource == "USER_EXPLICIT") else "assistant"
+                text = o.get("content") or ""
+                if not text and o.get("thinking") and include_thinking:
+                    text = "[thinking] " + o.get("thinking")
+                uuid = f"{session or 'agy'}-{o.get('step_index', '')}" if o.get("step_index") is not None else None
+                ts = o.get("created_at") or _now()
+                sess = session
+            else:
                 continue
             # Full fidelity: keep the complete original JSON line in `raw` (every turn, including
             # tool turns and sidechains), plus an extracted text slice in `content` for readable
             # search. raw never enters context, so completeness costs disk, not tokens.
-            msg = o.get("message") or {}
-            text = _extract_text(msg.get("content"), include_thinking)
             cur = conn.execute(
                 "INSERT OR IGNORE INTO log(ts,project,session,role,content,raw,msg_uuid) "
                 "VALUES(?,?,?,?,?,?,?)",
-                (o.get("timestamp") or _now(), project, o.get("sessionId") or session,
-                 o.get("type"), text, line, o.get("uuid")))
+                (ts, project, sess, role, text, line, uuid))
             added += cur.rowcount
         end = f.tell()
     # Advance the cursor monotonically. When start==0 we deliberately re-read from the top (new
@@ -2142,6 +2406,9 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--tags")
     pa.add_argument("--links")
     pa.add_argument("--source")
+    pa.add_argument("--origin-agent", "--agent", dest="origin_agent",
+                    choices=ORIGIN_AGENTS,
+                    help="Origin agent for provenance tracking (default: cli)")
     pa.set_defaults(func=cmd_add)
 
     pr = sub.add_parser("recall")
@@ -2172,11 +2439,15 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--json", action="store_true")
     pc.set_defaults(func=cmd_context)
 
-    ph = sub.add_parser("hook")
+    ph = sub.add_parser("hook", help="Lifecycle hook JSON for Claude Code / Antigravity")
     ph.add_argument("-p", "--project", default="auto")
     ph.add_argument("-b", "--budget", type=int, default=4000)
     ph.add_argument("--no-sync", action="store_true",
                     help="don't mirror Claude Code's file-memory before injecting")
+    ph.add_argument("--agent", choices=["claude", "agy", "antigravity"], default="claude",
+                    help="Target agent environment (default: claude)")
+    ph.add_argument("--event", choices=["boot", "stop", "sessionstart"], default=None,
+                    help="Hook lifecycle event (default: boot or sessionstart)")
     ph.set_defaults(func=cmd_hook)
 
     ps = sub.add_parser("supersede")
@@ -2184,7 +2455,17 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--status", default="superseded")
     ps.set_defaults(func=cmd_supersede)
 
-    pse = sub.add_parser("setup")
+    pse = sub.add_parser("setup", help="wire engrim into agent environments (Antigravity, Claude, Cursor)")
+    pse.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
+                     help="wire Antigravity hooks, deploy skill, and register MCP server")
+    pse.add_argument("--claude", dest="claude", action="store_true",
+                     help="wire Claude Code SessionStart/Stop hooks and CLAUDE.md")
+    pse.add_argument("--cursor", dest="cursor", action="store_true",
+                     help="add engrim MCP entry to Cursor mcp.json")
+    pse.add_argument("--all", dest="all", action="store_true",
+                     help="configure all detected agent environments")
+    pse.add_argument("--dry-run", action="store_true",
+                     help="display planned configurations without modifying disk")
     pse.add_argument("--settings", help="path to settings.json (default ~/.claude/settings.json)")
     pse.add_argument("--no-claude-md", action="store_true", help="don't touch ~/.claude/CLAUDE.md")
     pse.set_defaults(func=cmd_setup)
@@ -2266,11 +2547,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     pmcp = sub.add_parser("mcp", help="run engrim as an MCP server (stdio) for clients like Claude Code")
     pmcp.set_defaults(func=cmd_mcp)
+
+    psv = sub.add_parser("serve", help="serve engrim over stdio (e.g. --mcp)")
+    psv.add_argument("--mcp", action="store_true", default=True, help="run engrim as an MCP server over stdio")
+    psv.set_defaults(func=cmd_serve)
     return p
 
 
 def cmd_mcp(conn, a) -> None:
     """Run engrim as an MCP server over stdio (for MCP clients like Claude Code)."""
+    from engrim.mcp_server import serve
+    serve(conn)
+
+
+def cmd_serve(conn, a) -> None:
+    """Run engrim as an MCP server over stdio."""
     from engrim.mcp_server import serve
     serve(conn)
 
