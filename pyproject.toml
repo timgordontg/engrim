@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "engrim"
 dynamic = ["version"]
-description = "Project-scoped, cross-session memory for AI coding agents — hybrid keyword+semantic retrieval over a tagged SQLite store."
+description = "Project-scoped, cross-session episodic memory for AI coding agents (Google Antigravity, Claude Code, Cursor MCP) — local SQLite hybrid keyword+semantic store."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Tim Gordon" }]
-keywords = ["ai", "agents", "memory", "context", "retrieval", "sqlite", "claude-code", "llm", "rag"]
+keywords = ["ai", "agents", "memory", "antigravity", "claude-code", "cursor", "gemini", "deepmind", "mcp", "context-continuity"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",

@@ -29,7 +29,7 @@ def test_initialize_and_tools_list(tmp_path):
     assert init["serverInfo"]["name"] == "engrim"
     assert init["protocolVersion"] == "2025-06-18"           # client version echoed
     names = {t["name"] for t in resp[1]["result"]["tools"]}
-    assert names == {"engrim_recall", "engrim_context", "engrim_add"}
+    assert names == {"engrim_recall", "engrim_context", "engrim_add", "engrim_review"}
     assert {t["name"] for t in TOOLS} == names
 
 
