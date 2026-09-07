@@ -191,6 +191,15 @@ engrim serve --mcp
 | `engrim_context` | `(project: str = "auto", budget: int = 4000)` | Retrieve the session-boot memory pack within a character budget. |
 | `engrim_review` | `(project: str = "auto")` | Check uncaptured decisions from transcript logs before clearing. |
 
+`engrim_context` and `engrim context --json` return compact records: `id`, `ts`, `project`,
+`type`, the selected `summary`, `tags`, and `origin_agent`. Ordinary summaries are capped at
+200 characters; full summaries, details, links, and sources remain available through recall.
+For these JSON interfaces, `budget` limits the sum of the serialized record-object lengths,
+including metadata and JSON escaping; MCP `chars` reports that same sum. JSON array separators
+and brackets, response metadata, and MCP framing are additional. Only the newest active resume
+pointer is eligible: it stays first and untruncated when it fits, and is omitted from the JSON
+pack otherwise. A zero budget returns no records.
+
 ---
 
 ## 7. CLI Reference

@@ -23,7 +23,7 @@ import sys
 from engrim import __version__
 from engrim.cli import (
     TYPES, GLOBAL_PROJECT, ORIGIN_AGENTS, add_memory, _resolve_project,
-    _minder_rows, _recall_rows, _boot_pack, _scopes, _in_clause,
+    _minder_rows, _recall_rows, _context_pack, _context_json, _scopes, _in_clause,
     _capture_floor, _past_floor, _decision_snippet, _looks_like_narration,
     _semantic_decision_snippet, _is_captured, _resolve_embedder,
     _DECISION_CUES, _DECISION_EXEMPLARS, _UNCAPTURED_MAX_SCAN,
@@ -56,13 +56,15 @@ TOOLS = [
     {
         "name": "engrim_context",
         "description": ("Return the project's session-boot memory pack — the curated, high-signal "
-                        "records that orient you at the start of work, within a character budget."),
+                        "summaries that orient you at the start of work. Full records are available "
+                        "via engrim_recall. The budget and returned chars count serialized record "
+                        "objects; JSON array, response, and MCP framing are additional."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string", "default": "auto"},
                 "budget": {"type": "integer", "default": 4000,
-                           "description": "Character budget for the pack."},
+                           "description": "Character budget for serialized context records (framing excluded)."},
             },
         },
     },
@@ -125,10 +127,9 @@ def _tool_context(conn, args: dict) -> str:
     pclause, pparams = _in_clause(_scopes(project), "project")
     rows = conn.execute("SELECT * FROM memories WHERE " + pclause + " AND status = 'active'",
                         pparams).fetchall()
-    picked, used = _boot_pack(rows, budget)
-    recs = [dict(r) for r, _s in picked]
-    return json.dumps({"project": project, "loaded": len(recs), "total_active": len(rows),
-                       "chars": used, "records": recs}, default=str, indent=2)
+    recs, used = _context_pack(rows, budget)
+    return _context_json({"project": project, "loaded": len(recs), "total_active": len(rows),
+                          "chars": used, "records": recs})
 
 
 def _tool_add(conn, args: dict, client_agent: str | None = None) -> str:

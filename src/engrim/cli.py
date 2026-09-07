@@ -770,25 +770,29 @@ def _is_resume(row):
         return False
 
 
-def _boot_pack(rows, budget):
+def _boot_pack(rows, budget, *, record_cost=None):
     """Build the session-boot slice under a char budget, FAIRLY across types so a flood of one type
     (e.g. dozens of feedback records) can't starve recent decisions/facts. Returns [(row, summary)]
     with long summaries truncated, plus the total char cost. The resume cursor (if any) is pinned
     first and untruncated. Shared by `context` (display) and `stats` (economics) so the reported cost
-    is exactly the pack that loads."""
+    is exactly the pack that loads. JSON callers supply the serialized record cost, which enforces
+    the budget for every record, including the resume cursor."""
     picked, used = [], 0
+    measure = record_cost or (lambda row, summary: len(summary) + 40)
     # Pin the resume cursor first, untruncated — the one record we never clip, since it IS the place to
     # resume. Newest wins if several are tagged. It still counts against the budget; the rest fills around.
     resume = [r for r in rows if _is_resume(r)]
     cursor = max(resume, key=lambda r: r["ts"]) if resume else None
     if cursor is not None:
         csum = cursor["summary"] or ""
-        picked.append((cursor, csum))
-        used += len(csum) + 40
+        cost = measure(cursor, csum)
+        if record_cost is None or cost <= budget:
+            picked.append((cursor, csum))
+            used += cost
     by_type = {}
     for r in rows:
-        if cursor is not None and r["id"] == cursor["id"]:
-            continue                                           # already pinned; don't round-robin it again
+        if cursor is not None and _is_resume(r):
+            continue                       # newest wins, even if omitted; never revive an older cursor
         by_type.setdefault(r["type"], []).append(r)
     for t in by_type:
         by_type[t].sort(key=lambda r: r["ts"], reverse=True)   # recent-first within a type
@@ -806,11 +810,30 @@ def _boot_pack(rows, budget):
             summ = r["summary"] or ""
             if len(summ) > _BOOT_SUMMARY_CAP:
                 summ = summ[:_BOOT_SUMMARY_CAP - 1].rstrip() + "…"
-            cost = len(summ) + 40
+            cost = measure(r, summ)
             if used + cost <= budget:                          # skip what won't fit, keep trying others
                 picked.append((r, summ))
                 used += cost
     return picked, used
+
+
+def _context_json(value):
+    """Use the same JSON encoding to measure context records and to return them."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _context_pack(rows, budget):
+    """Produce budgeted JSON context records, never full database rows. `used` counts serialized
+    record objects, including escaped strings and metadata; array/response/MCP framing is extra.
+    Full summaries, details, links, and sources remain in storage and are available via recall."""
+    def record(row, summary):
+        return {"id": row["id"], "ts": row["ts"], "project": row["project"],
+                "type": row["type"], "summary": summary, "tags": row["tags"],
+                "origin_agent": row["origin_agent"]}
+
+    picked, used = _boot_pack(rows, budget,
+                              record_cost=lambda row, summary: len(_context_json(record(row, summary))))
+    return [record(row, summary) for row, summary in picked], used
 
 
 # The boot pack's recent-activity tail (#191): the freshest decision-signal turns from the LOG that
@@ -994,10 +1017,11 @@ def cmd_context(conn, a) -> None:
     rows = conn.execute(
         "SELECT * FROM memories WHERE " + pclause + " AND status = 'active'", pparams
     ).fetchall()
-    picked, used = _boot_pack(rows, a.budget)
     if getattr(a, "json", False):
-        print(json.dumps([dict(r) for r, _s in picked], default=str))
+        records, _used = _context_pack(rows, a.budget)
+        print(_context_json(records))
         return
+    picked, used = _boot_pack(rows, a.budget)
     tail = _recent_tail(conn, project)
     if not picked and not tail:
         print(f"(no memory for project={project})")
