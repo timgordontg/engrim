@@ -782,7 +782,8 @@ def _boot_pack(rows, budget, *, record_cost=None):
     # Pin the resume cursor first, untruncated — the one record we never clip, since it IS the place to
     # resume. Newest wins if several are tagged. It still counts against the budget; the rest fills around.
     resume = [r for r in rows if _is_resume(r)]
-    cursor = max(resume, key=lambda r: r["ts"]) if resume else None
+    # Timestamps have second precision; the later insert wins when two pointers share a second.
+    cursor = max(resume, key=lambda r: (r["ts"], r["id"])) if resume else None
     if cursor is not None:
         csum = cursor["summary"] or ""
         cost = measure(cursor, csum)

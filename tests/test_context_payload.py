@@ -147,6 +147,23 @@ def test_older_resume_pointer_never_replaces_the_newest(context_store, budget):
         assert ids[0] == newest
 
 
+@pytest.mark.parametrize("oversized", [False, True])
+def test_resume_pointer_uses_the_latest_write_when_timestamps_tie(context_store, monkeypatch, oversized):
+    monkeypatch.setattr(cli, "_now", lambda: "2026-09-07T12:00:00")
+    older = cli.add_memory(context_store, project="/p", type="state", summary="Deploy Redis.",
+                           tags=["resume-pointer"])
+    summary = "Migrate sessions to Postgres." + ("R" * 10_000 if oversized else "")
+    newest = cli.add_memory(context_store, project="/p", type="state", summary=summary,
+                            tags=["resume-pointer"])
+    fact = cli.add_memory(context_store, project="/p", type="fact", summary="Useful current fact.")
+
+    result, _ = _mcp(context_store, "engrim_context", {"project": "/p", "budget": 4000})
+    ids = [r["id"] for r in result["records"]]
+
+    assert older not in ids
+    assert ids == ([fact] if oversized else [newest, fact])
+
+
 def test_non_context_fields_cannot_expand_the_pack(context_store):
     cli.add_memory(context_store, project="/p", type="decision", summary="Use Redis for sessions.",
                    links=["L" * 50_000], source="S" * 50_000)
