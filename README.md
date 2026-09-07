@@ -110,11 +110,24 @@ engrim setup --claude
 - Configures live ambient status line in Claude Code's status bar.
 - Appends memory usage notes to `~/.claude/CLAUDE.md`.
 
-#### Cursor & Windsurf
+#### Cursor
 ```bash
 engrim setup --cursor
 ```
 - Adds `engrim` to `~/.cursor/mcp.json` running `engrim serve --mcp`.
+
+#### Windsurf
+Add `engrim` to your `~/.codeium/windsurf/mcp_config.json`:
+```json
+{
+  "mcpServers": {
+    "engrim": {
+      "command": "engrim",
+      "args": ["serve", "--mcp"]
+    }
+  }
+}
+```
 
 #### All Platforms
 ```bash
@@ -195,6 +208,7 @@ engrim serve --mcp
 
 ---
 
+<a id="security--privacy"></a>
 ## 9. Security & Privacy
 
 - **100% Local & Offline**: All memory records and logs reside in a local SQLite file (`~/.engrim/memory.db`). No telemetry, no cloud sync, no tracking.
