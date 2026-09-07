@@ -936,7 +936,7 @@ def _uncaptured_state_key(conn, project):
         "       (SELECT COUNT(*) FROM memories WHERE project=? AND status='active')",
         (project, project, project)).fetchone()
     mode = os.environ.get("ENGRIM_EMBED", "").strip().lower()
-    return f"{row[0]}|{row[1]}|{row[2]}|{mode}"
+    return f"{_CAPTURE_CHECK_VERSION}|{row[0]}|{row[1]}|{row[2]}|{mode}"
 
 
 def _uncaptured_count(conn, project, scan=_CAPTURE_SCAN, cap=9):
@@ -2300,6 +2300,31 @@ _DECISION_SEM_FLOOR = 0.45
 # bias toward flagging (a harmless nudge) over a false "captured" (a silently dropped decision; #143).
 _CAPTURED_SIM = 0.45
 
+# Both durable capture caches must expire when the evidence policy changes.
+_CAPTURE_CHECK_VERSION = 2
+
+
+def _capture_candidate_allowed(snippet, summary, detail):
+    """Similarity cannot establish the scope of a negation. Require the same statement whenever
+    either side contains explicit negation; retain every word and its order for that comparison.
+    A missed paraphrase prompts review, whereas a false match silently hides a reversed decision.
+    This is deliberately conservative, not a general contradiction/entailment classifier."""
+    def words(text):
+        return re.findall(r"\b\w+(?:'\w+)*\b", (text or "").casefold().replace("’", "'"))
+
+    tokens = words(snippet)
+    fields = (summary or "", detail or "")
+    negations = {"not", "no", "never", "neither", "nor", "without", "cannot"}
+    if not any(t in negations or t.endswith("n't")
+               for t in tokens + words("\n".join(fields))):
+        return True
+    # Check fields independently so surrounding rationale does not prevent an exact capture.
+    return bool(tokens) and any(
+        tokens == words(statement)
+        for field in fields
+        for statement in [field, *re.split(r"(?<=[.!?])\s+|\n+", field)]
+    )
+
 
 def _decision_snippet(text, cues=_DECISION_CUES):
     """Tighten a turn down to the sentence that carried the cue (decisions by default; the recency
@@ -2343,12 +2368,13 @@ def _semantic_decision_snippet(content, fn, exemplar_vecs):
 
 
 def _max_similarity(conn, project, text, fn):
-    """Best cosine of `text` against the project's stored record embeddings (0.0 if none / no backend)."""
+    """Best capture-eligible cosine (0.0 if none / no backend). Search has its own similarity path."""
     if not fn:
         return 0.0
     rows = conn.execute(
-        "SELECT e.vec AS vec FROM embedding e JOIN memories m ON m.id = e.memory_id "
+        "SELECT e.vec AS vec, m.summary, m.detail FROM embedding e JOIN memories m ON m.id = e.memory_id "
         "WHERE m.project = ? AND m.status = 'active'", (project,)).fetchall()
+    rows = [r for r in rows if _capture_candidate_allowed(text, r["summary"], r["detail"])]
     if not rows:
         return 0.0
     qv = fn(text)
@@ -2371,7 +2397,7 @@ def _curated_state_key(conn, project):
     row = conn.execute(
         "SELECT MAX(ts), COUNT(*) FROM memories WHERE project=? AND status='active'",
         (project,)).fetchone()
-    return f"{row[0]}|{row[1]}|{os.environ.get('ENGRIM_EMBED', '').strip().lower()}"
+    return f"{_CAPTURE_CHECK_VERSION}|{row[0]}|{row[1]}|{os.environ.get('ENGRIM_EMBED', '').strip().lower()}"
 
 
 def _snippet_key(snippet):
@@ -2422,9 +2448,10 @@ def _is_captured(conn, project, snippet, fn=_UNSET):
     nudge, so the counter looked stale and cried wolf — the exact trust the clear-safe signal is for
     (#219, #747).
 
-    Evidence is a UNION: strong word overlap OR semantic match. Both are evidence of the same thing,
-    and taking either keeps the answer stable when the embedder is unavailable on one call and present
-    on the next (a lexical hit stays a hit either way).
+    Evidence is a UNION: strong word overlap OR semantic match, but only among capture-eligible
+    records. Explicit negation requires a matching statement in either tier: similarity alone
+    cannot distinguish a decision from its opposite. A lexical hit stays a hit when the embedder
+    is unavailable on one call and present on the next.
 
     Tiered on purpose: the lexical pass is free and runs first, so a project that's already clear-safe
     never pays for a model load. Only a snippet that lexical would NAG about escalates to the embedder
@@ -2455,6 +2482,8 @@ def _lexical_overlap_captured(conn, project, snippet):
     for r in conn.execute(
             "SELECT summary, detail FROM memories WHERE project = ? AND status = 'active'",
             (project,)).fetchall():
+        if not _capture_candidate_allowed(snippet, r["summary"], r["detail"]):
+            continue
         rt = set(re.findall(r"[a-z0-9]{4,}", ((r["summary"] or "") + " " + (r["detail"] or "")).lower()))
         if rt and len(toks & rt) / len(toks) >= 0.6:
             return True
