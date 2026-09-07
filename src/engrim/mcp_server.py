@@ -94,7 +94,9 @@ TOOLS = [
     {
         "name": "engrim_review",
         "description": ("Check coverage before clearing context: surface recent decisions from "
-                        "the transcript log that don't appear to be in curated memory yet."),
+                        "the transcript log that don't appear to be in curated memory yet. "
+                        "safe_to_clear is null (unknown) when this project has no transcript log; "
+                        "otherwise it is a boolean heuristic verdict about the available log."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -167,10 +169,12 @@ def _tool_review(conn, args: dict) -> str:
         return json.dumps({
             "project": project,
             "total_log_turns": 0,
+            "scanned_turns": 0,
             "active_curated": curated,
-            "safe_to_clear": True,
+            "safe_to_clear": None,
+            "uncaptured_count": 0,
             "uncaptured": [],
-            "message": "no transcript log yet — nothing to check.",
+            "message": "no transcript log yet — insufficient evidence to assess whether it is safe to clear.",
         }, indent=2)
 
     floor = _capture_floor(conn, project)

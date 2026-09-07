@@ -191,6 +191,11 @@ engrim serve --mcp
 | `engrim_context` | `(project: str = "auto", budget: int = 4000)` | Retrieve the session-boot memory pack within a character budget. |
 | `engrim_review` | `(project: str = "auto")` | Check uncaptured decisions from transcript logs before clearing. |
 
+`engrim_review` returns `safe_to_clear: null` (unknown) when the project has no transcript log,
+even if it has saved memories. With logged turns, the field is a boolean heuristic verdict:
+`false` means possible uncaptured decisions were detected; `true` means none were detected in
+the reviewed log. It does not verify that logging captured the entire session.
+
 ---
 
 ## 7. CLI Reference
