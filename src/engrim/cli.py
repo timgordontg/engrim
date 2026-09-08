@@ -2051,6 +2051,129 @@ def cmd_sync(conn, a) -> None:
             print(f"  {action:4} {source}\n         {summary[:80]}")
 
 
+# --------------------------------------------------------------------------- merge
+# Two stores of the same project meet whenever a project's agents run in more than one place — a
+# laptop and a CI runner, two machines, two agents at once — and each ends up holding decisions the
+# other lacks. `merge` folds OTHER's records into this store, idempotently, so both places can keep
+# writing and reconcile afterwards.
+#
+# Identity is content, not id. `memories.id` is assigned per store, so two stores seeded from the
+# same base hand the same id to different records; the natural key is
+# (project, ts, type, summary, detail) — ts is to the second with a zone, and nothing ever rewrites
+# a record's text (`supersede` changes status only). Status is monotonic: active -> superseded/done
+# is the only mutation engrim makes, so a non-active status on either side wins, which makes the
+# merge safe in either direction and more than once. `memories_fts` follows through its triggers;
+# a merged row is embedded the way `add` embeds (best-effort); `log` rows dedup on their own
+# (project, msg_uuid) index. The source is opened read-only and its contents are never modified
+# (reading a WAL-mode store creates empty -wal/-shm sidecars beside it, as any reader does).
+_MERGE_KEY_SQL = "project = ? AND ts = ? AND type = ? AND summary = ? AND coalesce(detail,'') = ?"
+
+
+def _open_store_readonly(path: str) -> sqlite3.Connection:
+    """Open another engrim store for reading only — no schema migration, no WAL switch, and the
+    file is never created or written. Exits with a plain message when `path` is not an engrim
+    store."""
+    if not os.path.isfile(path):
+        sys.exit(f"merge: no such file: {path}")
+    try:
+        src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        src.row_factory = sqlite3.Row
+        has = src.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
+    except sqlite3.DatabaseError:
+        sys.exit(f"merge: not an engrim store (not a SQLite database): {path}")
+    if not has:
+        sys.exit(f"merge: not an engrim store (no memories table): {path}")
+    return src
+
+
+def merge_store(conn, other_path, project=None, dry_run=False):
+    """Fold OTHER's memories (and transcript log rows) into `conn`.
+
+    Returns (added, restatused, skipped, log_added, plan) where plan is a list of
+    (action, summary) for --dry-run / --verbose. Idempotent: a second run adds nothing."""
+    src = _open_store_readonly(other_path)
+    src_cols = {r[1] for r in src.execute("PRAGMA table_info(memories)")}
+    where, params = ("WHERE project = ?", (project,)) if project else ("", ())
+    rows = src.execute(f"SELECT * FROM memories {where} ORDER BY id", params).fetchall()
+    added = restatused = skipped = 0
+    plan = []
+    fn, name = _resolve_embedder()
+    for r in rows:
+        detail = r["detail"]
+        key = (r["project"], r["ts"], r["type"], r["summary"], detail or "")
+        mine = conn.execute(
+            f"SELECT id, status FROM memories WHERE {_MERGE_KEY_SQL}", key).fetchone()
+        if mine is None:
+            plan.append(("add", r["summary"]))
+            added += 1
+            if dry_run:
+                continue
+            cur = conn.execute(
+                "INSERT INTO memories(ts,project,type,summary,detail,status,tags,links,source,origin_agent) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (r["ts"], r["project"], r["type"], r["summary"], detail, r["status"],
+                 r["tags"], r["links"], r["source"],
+                 r["origin_agent"] if "origin_agent" in src_cols else None))
+            if fn:
+                try:
+                    _embed_row(conn, cur.lastrowid, r["summary"], detail, fn, name)
+                except Exception:
+                    pass
+        elif mine["status"] == "active" and r["status"] != "active":
+            plan.append((r["status"][:4], r["summary"]))
+            restatused += 1
+            if not dry_run:
+                conn.execute("UPDATE memories SET status=? WHERE id=?", (r["status"], mine["id"]))
+        else:
+            plan.append(("skip", r["summary"]))
+            skipped += 1
+    log_added = 0
+    if src.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='log'").fetchone():
+        log_cols = {c[1] for c in src.execute("PRAGMA table_info(log)")}
+        for lr in src.execute(f"SELECT * FROM log {where} ORDER BY id", params):
+            # Rows with a uuid dedup on the store's own (project, msg_uuid) index; rows without
+            # one (NULLs never collide there) dedup on their content instead, so a second merge
+            # adds nothing either way.
+            if lr["msg_uuid"]:
+                exists = conn.execute("SELECT 1 FROM log WHERE project = ? AND msg_uuid = ?",
+                                      (lr["project"], lr["msg_uuid"])).fetchone()
+            else:
+                exists = conn.execute(
+                    "SELECT 1 FROM log WHERE project = ? AND ts = ? AND role = ? "
+                    "AND coalesce(content,'') = ? AND msg_uuid IS NULL",
+                    (lr["project"], lr["ts"], lr["role"], lr["content"] or "")).fetchone()
+            if exists:
+                continue
+            log_added += 1
+            if not dry_run:
+                conn.execute(
+                    "INSERT INTO log(ts,project,session,role,content,raw,msg_uuid) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (lr["ts"], lr["project"], lr["session"], lr["role"], lr["content"],
+                     lr["raw"] if "raw" in log_cols else None, lr["msg_uuid"]))
+    src.close()
+    if not dry_run:
+        conn.commit()
+    return added, restatused, skipped, log_added, plan
+
+
+def cmd_merge(conn, a) -> None:
+    """Fold another store's records into this one (see merge_store). `--project` narrows to one
+    project tag; the default takes every project the other store holds, since merging is about
+    two copies of the same memory, not about which directory you happen to be in."""
+    if os.path.isfile(a.other) and os.path.realpath(a.other) == os.path.realpath(a.db):
+        sys.exit("merge: source and target are the same store")
+    added, restatused, skipped, log_added, plan = merge_store(
+        conn, a.other, project=a.project, dry_run=a.dry_run)
+    head = "DRY-RUN — no changes written" if a.dry_run else "merged"
+    print(f"{head}: +{added} add, ~{restatused} status, {skipped} skip, +{log_added} log "
+          f"-> from {a.other}")
+    if a.dry_run or a.verbose:
+        for action, summary in plan:
+            print(f"  {action:4} {summary[:80]}")
+
+
 # --------------------------------------------------------------------------- transcript log
 # A SEPARATE, append-only tier from `memories`. It records the raw back-and-forth so engineers
 # have a full, replayable record — but it is NEVER injected into the boot pack / context window, so
@@ -2859,6 +2982,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="keep records whose md source vanished (default: supersede them)")
     psy.add_argument("--verbose", action="store_true", help="list every add/update/skip/prune")
     psy.set_defaults(func=cmd_sync)
+
+    pmg = sub.add_parser("merge", help="fold another engrim store's records into this one (idempotent)")
+    pmg.add_argument("other", help="path to the other engrim store (opened read-only)")
+    pmg.add_argument("-p", "--project", default=None,
+                     help="only this project tag (default: every project in the other store)")
+    pmg.add_argument("--dry-run", action="store_true", help="show the plan, write nothing")
+    pmg.add_argument("--verbose", action="store_true", help="list every add/status/skip")
+    pmg.set_defaults(func=cmd_merge)
 
     plog = sub.add_parser("log")
     plog.add_argument("-p", "--project", default="auto")
