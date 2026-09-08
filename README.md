@@ -207,6 +207,7 @@ engrim serve --mcp
 | `engrim list` | `engrim list [-k 20]` | List recent memories for the current project. |
 | `engrim supersede`| `engrim supersede --id 12 --status superseded` | Mark a record superseded without erasing history. |
 | `engrim sync` | `engrim sync [DIR]` | Mirror markdown memories into the store (idempotent seed-once). |
+| `engrim merge` | `engrim merge OTHER.db [--dry-run]` | Fold another store's records into this one (content-keyed, idempotent; retirements carry over). |
 
 ---
 
