@@ -16,6 +16,7 @@ CLI:
   supersede mark status by id        engrim supersede --id 12 --status superseded
   projects  list tags + counts       engrim projects
   stats     row/health summary       engrim stats
+  count     one-line store count     engrim count [--json]  ("N records, M active", whole store)
   prune     purge logs + vacuum      engrim prune [--keep-days <days> | --all | --vacuum]
   review    coverage check           engrim review [--strict]
 
@@ -1173,6 +1174,25 @@ def cmd_projects(conn, a) -> None:
         print(f"{r['n']:4d} ({r['active']} active)  last {r['last'][:16]}  {r['project']}")
     if not rows:
         print("(empty store)")
+
+
+def _store_counts(conn) -> tuple[int, int]:
+    """(records, active records) across the whole store — every project and the global layer."""
+    total = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+    active = conn.execute("SELECT count(*) FROM memories WHERE status = 'active'").fetchone()[0]
+    return total, active
+
+
+def cmd_count(conn, a) -> None:
+    """One line for the whole store: `N records, M active`. The number a script wants — a CI step
+    logging what it seeded or captured, a job watching a store grow — with no project resolution
+    (`stats` derives one from the cwd and prints its context economics) and one line rather than
+    one per project (`projects`)."""
+    total, active = _store_counts(conn)
+    if a.json:
+        print(json.dumps({"records": total, "active": active}))
+        return
+    print(f"{total} records, {active} active")
 
 
 def _est_tokens(chars: int) -> int:
@@ -3054,6 +3074,9 @@ def build_parser() -> argparse.ArgumentParser:
     ppr.set_defaults(func=cmd_prune)
 
     sub.add_parser("projects").set_defaults(func=cmd_projects)
+    pct = sub.add_parser("count", help="one line for the whole store: N records, M active")
+    pct.add_argument("--json", action="store_true")
+    pct.set_defaults(func=cmd_count)
 
     pst = sub.add_parser("stats")
     pst.add_argument("-p", "--project", default="auto")
