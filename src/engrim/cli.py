@@ -17,6 +17,7 @@ CLI:
   projects  list tags + counts       engrim projects
   stats     row/health summary       engrim stats
   prune     purge logs + vacuum      engrim prune [--keep-days <days> | --all | --vacuum]
+  backup    consistent copy          engrim backup COPY.db [--force] [--json]   (safe while agents hold the store)
   review    coverage check           engrim review [--strict]
 
 Every record is tagged by `project` (a folder path). `--project auto` (the default) derives it
@@ -2174,6 +2175,56 @@ def cmd_merge(conn, a) -> None:
             print(f"  {action:4} {summary[:80]}")
 
 
+def cmd_backup(conn, a) -> None:
+    """Write a consistent copy of the whole store to `a.dest` through SQLite's online backup API.
+
+    Safe while another process (the MCP server, a session's hooks) still holds the store open: the
+    copy is one snapshot, never a read torn by a write in flight, and whatever sits in the -wal
+    sidecar is folded in rather than left behind. A plain file copy of a WAL-mode store gives
+    neither guarantee. The result is a complete engrim store (FTS, embeddings, log and meta
+    included) that `--db` can open directly."""
+    dest = a.dest
+    fresh = not os.path.exists(dest)
+    if not fresh:
+        mine = {os.path.realpath(a.db + ext) for ext in ("", "-wal", "-shm")}
+        if os.path.realpath(dest) in mine:
+            sys.exit("backup: destination is the store itself")
+        if not a.force:
+            sys.exit(f"backup: {dest} exists (pass --force to overwrite it)")
+    d = os.path.dirname(dest)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    copy = err = None
+    try:
+        copy = sqlite3.connect(dest)
+        conn.backup(copy)
+        total = copy.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        active = copy.execute(
+            "SELECT COUNT(*) FROM memories WHERE status = 'active'").fetchone()[0]
+    except sqlite3.DatabaseError as e:
+        err = e
+    finally:
+        if copy is not None:
+            copy.close()                # before any remove: Windows can't unlink an open file
+    if err is not None:
+        if fresh:                       # don't leave a partial file that blocks the next run
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+        sys.exit(f"backup: {err}: {dest}")
+    # The store's own owner-only stance (best-effort; no-op on Windows), sidecars included.
+    for _ext in ("", "-wal", "-shm"):
+        try:
+            os.chmod(dest + _ext, 0o600)
+        except OSError:
+            pass
+    if a.json:
+        print(json.dumps({"records": total, "active": active, "dest": dest}))
+        return
+    print(f"backed up {total} records, {active} active -> {dest}")
+
+
 # --------------------------------------------------------------------------- transcript log
 # A SEPARATE, append-only tier from `memories`. It records the raw back-and-forth so engineers
 # have a full, replayable record — but it is NEVER injected into the boot pack / context window, so
@@ -2990,6 +3041,12 @@ def build_parser() -> argparse.ArgumentParser:
     pmg.add_argument("--dry-run", action="store_true", help="show the plan, write nothing")
     pmg.add_argument("--verbose", action="store_true", help="list every add/status/skip")
     pmg.set_defaults(func=cmd_merge)
+
+    pbk = sub.add_parser("backup", help="write a consistent copy of the store (safe while it's in use)")
+    pbk.add_argument("dest", help="path for the copy (a complete engrim store)")
+    pbk.add_argument("--force", action="store_true", help="overwrite an existing file at DEST")
+    pbk.add_argument("--json", action="store_true")
+    pbk.set_defaults(func=cmd_backup)
 
     plog = sub.add_parser("log")
     plog.add_argument("-p", "--project", default="auto")
