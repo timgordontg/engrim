@@ -359,5 +359,5 @@ def test_cli_version_flag(capsys):
         main(["--version"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "engrim 1.3.2" in out
+    assert f"engrim {cli.__version__}" in out
 

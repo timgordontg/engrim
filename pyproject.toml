@@ -24,6 +24,9 @@ dependencies = ["model2vec>=0.3"]
 
 [project.urls]
 Homepage = "https://github.com/timgordontg/engrim"
+Documentation = "https://github.com/timgordontg/engrim#readme"
+Repository = "https://github.com/timgordontg/engrim"
+Changelog = "https://github.com/timgordontg/engrim/releases"
 
 [project.scripts]
 engrim = "engrim.cli:main"
