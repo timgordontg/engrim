@@ -9,7 +9,8 @@ Two workflows that give a [gh-aw](https://github.github.com/gh-aw/) agent memory
 | `.github/lib/claude/context-restart.sh` | The Claude Code hook: blocks the compaction, nudges the model, ends the session once the resume-pointer is written and the turn has ended, writes the crash pointer. |
 | `.github/lib/claude/settings.json` | Wires the hook to its five events. Installed into the agent's HOME with the script. |
 | `.github/lib/artifact.py` | The newest unexpired artifact with an exact name, optionally downloaded. Standard library. |
-| `.github/lib/engrim/store.py` | `count`, `capture` (sqlite's online backup API) and `retire` on a store. Standard library; runs inside the server's image with the script on stdin. |
+
+The store operations — the seed's size, the capture, the pointer retirement — are engrim's own `projects`, `backup` and `retire` (1.4.0), run from the same wheel the server uses.
 
 ## How a run goes
 
@@ -17,8 +18,8 @@ Two workflows that give a [gh-aw](https://github.github.com/gh-aw/) agent memory
 2. **Serve.** gh-aw's MCP gateway starts engrim's stdio server in a stock `python:3.13.15-alpine3.24` container with the wheel mounted read-only on `PYTHONPATH`, `--network none`, `ENGRIM_EMBED=off` (pure lexical, standard library only) and the store mounted read-write from `/tmp`. The agent sees `engrim_context`, `engrim_add` and `engrim_recall`.
 3. **Work.** The prompt's first instruction is `engrim_context`. Records mean the agent is either resuming this job (an active `resume-pointer`) or reading what earlier runs learned. It writes records at phase boundaries and keeps one honest pointer that names every comment and label already emitted.
 4. **Restart instead of compacting.** When Claude Code's auto-compaction threshold trips, the `PreCompact` hook blocks the compaction (exit 2) and marks the session; the next tool result carries a `PostToolUse` nudge — "your context is nearly full: finish, or write your resume-pointer". When the model writes an `engrim_add` tagged `resume-pointer`, the hook asks it to end its turn, and the `Stop` hook then sends `SIGTERM` to Claude Code (exit 143), which gh-aw's harness treats as a signal termination and retries as a **fresh run**. That run boots from the memory pack. If the wall comes first (a "prompt is too long" 400), the harness retries anyway and a `StopFailure` hook leaves a mechanical crash pointer that `SessionStart` hands to the next session.
-5. **Capture.** A post-step (`if: always()`) takes a consistent copy of the store with sqlite's online backup API and uploads it as `engrim-memory-run-<run id>`.
-6. **Merge.** `engrim-memory.yml` fires on `workflow_run: completed`, downloads the canonical store and that run's store, runs `engrim merge` (content-keyed, so ids never collide; status monotonic, so a retirement on either side wins; idempotent), retires every active `resume-pointer` in the result (a pointer describes a working tree that no longer exists, and the next run must not mistake it for its own), uploads the result as `engrim-memory` and deletes the run store. Its concurrency group with `cancel-in-progress: false` and `queue: max` makes GitHub run one merge at a time and keep every pending one, so two agent runs that end together get two merges, in order.
+5. **Capture.** A post-step (`if: always()`) takes a consistent copy of the store with `engrim backup` (sqlite's online backup API, safe while the server still holds the file) and uploads it as `engrim-memory-run-<run id>`.
+6. **Merge.** `engrim-memory.yml` fires on `workflow_run: completed`, downloads the canonical store and that run's store, runs `engrim merge` (content-keyed, so ids never collide; status monotonic, so a retirement on either side wins; idempotent), then `engrim retire --all` on the result (a pointer describes a working tree that no longer exists, and the next run must not mistake it for its own), uploads the result as `engrim-memory` and deletes the run store. Its concurrency group with `cancel-in-progress: false` and `queue: max` makes GitHub run one merge at a time and keep every pending one, so two agent runs that end together get two merges, in order.
 
 ## Install
 
@@ -31,9 +32,9 @@ Two workflows that give a [gh-aw](https://github.github.com/gh-aw/) agent memory
    ```
 
 4. Merge to the default branch. `workflow_run` triggers fire only for workflow files on the default branch, so the merge workflow is live once it is there. Until then runs still upload their stores, and the first merge folds them in order.
-5. Watch a run: the seed step prints `seeding N records, M active`, the capture step `captured N records, M active`, and the merge run `merged: +A add, ~S status, K skip` then `retired K resume-pointer(s); now N records, M active`.
+5. Watch a run: the seed step prints `seeding from engrim-memory:` and one `engrim projects` line per project tag (`N (M active)  last …  my-app`), the capture step `backed up N records, M active -> /out/memory.db`, and the merge run `merged: +A add, ~S status, K skip`, then `retired K resume-pointer(s) · all projects` and the folded store's `projects` lines.
 
-Runner requirements: Docker (the gateway needs it anyway; the seed, capture and merge steps run one-shot containers of the same image so file ownership on the store matches the server's), `python3` for the two scripts, `curl` and `sha256sum` for the wheel — all on `ubuntu-latest`.
+Runner requirements: Docker (the gateway needs it anyway; the capture and merge steps run one-shot containers of the same image so file ownership on the store matches the server's), `python3` for `lib/artifact.py` and the seed step's `engrim projects` (the staged wheel on `PYTHONPATH`), `curl` and `sha256sum` for the wheel — all on `ubuntu-latest`.
 
 ## Things to know
 
@@ -41,7 +42,9 @@ Runner requirements: Docker (the gateway needs it anyway; the seed, capture and 
 - **Do not set `DISABLE_AUTO_COMPACT`.** The compaction threshold is the trigger; disabling auto-compaction removes it. It sits at a fraction of the window Claude Code believes the model has, so prefer a model with a 200k default window (Sonnet 5 and Opus 5 are 1M natively). Tune where it fires with `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, or declare the real window with `CLAUDE_CODE_MAX_CONTEXT_TOKENS` if your model is not one Claude Code recognises.
 - **`harness.max-retries` is the restart budget.** Each restart is a fresh Claude Code process; `timeout-minutes` still bounds the job.
 - **The restart is a signal because nothing else restarts.** The harness retries a failed process and takes exit 0 as done, and no hook outcome makes Claude Code exit non-zero: `continue: false`, a failing `Stop` hook, a blocking one and a failing `SessionEnd` hook all exit 0 (measured on 2.1.247). `SIGTERM` is the one exit the harness maps straight to a fresh run, so the `Stop` hook sends it once the model has ended its turn, at a turn boundary with the transcript flushed.
-- **Only the merge workflow makes canonical stores.** It is where pointers are retired; engrim itself pins the newest `resume-pointer` in the boot pack and never retires one. A store seeded from anywhere else (a run artifact by hand, say) may still carry an active pointer, and the agent would boot as if resuming it.
+- **Only the merge workflow makes canonical stores.** It is where pointers are retired (`engrim retire --all`); engrim pins the newest `resume-pointer` in the boot pack and retires one only when asked. A store seeded from anywhere else (a run artifact by hand, say) may still carry an active pointer, and the agent would boot as if resuming it.
+- **The captured copy is made readable before upload.** `engrim backup` leaves its copy owner-only, like the store; in the capture container the owner is root, and `actions/upload-artifact` on the runner cannot read a root-owned 0600 file (measured on an ARC runner: `EACCES`). The capture step chmods the copy to 0644 after the backup. The merge workflow needs nothing: its stores are downloaded by the runner, and engrim's chmod keeps the owner.
+- **engrim 1.4.0 or newer.** `backup`, `retire` and `projects` arrived in 1.4.0. The wheel is pinned by version and SHA-256 in both workflow files; move the two pins together.
 - **Records are notes, never instructions.** The store persists across issues, so text derived from one issue can reach a run on another. The prompt says so; keep saying so.
 - **Pin by tag, not digest, in `mcp-servers.container`.** The gateway's config schema accepts `name:tag` only. Pin the wheel by SHA-256 instead.
 - **WAL and read-only mounts.** engrim stores are WAL-mode; SQLite needs to create the `-shm` file even to read one, so the merge mounts both stores read-write (`merge` never writes its source).
