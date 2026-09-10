@@ -8,14 +8,16 @@ affiliated with or endorsed by Anthropic).
 
 CLI:
   add       insert a memory          engrim add -t decision -s "..." [-d "..."] [--tags a,b] [--global]
-  recall    ranked relevant slice    engrim recall -q "rl reward" [-k 8] [--detail]
+  recall    ranked relevant slice    engrim recall -q "rl reward" [-k 8] [--detail] [--tag auth]
   context   session-boot pack        engrim context [-b 4000]
   hook      SessionStart JSON         engrim hook            (used by the hook; self-scopes to cwd)
   setup     wire the hook + notes     engrim setup           (white-glove one-shot install)
-  list      recent for a project     engrim list [-k 20]
+  list      recent for a project     engrim list [-k 20] [--tag auth]
   supersede mark status by id        engrim supersede --id 12 --status superseded
   projects  list tags + counts       engrim projects
   stats     row/health summary       engrim stats
+  prune     purge logs + vacuum      engrim prune [--keep-days 30] [--all]
+  review    coverage check           engrim review [--strict]
 
 Every record is tagged by `project` (a folder path). `--project auto` (the default) derives it
 from the current directory, so one store serves many projects cleanly.
@@ -72,6 +74,15 @@ def _agent_display(agent: str | None) -> str:
 
 def _now() -> str:
     return _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _is_strict(a=None) -> bool:
+    """Return True if strict / gate mode is active via CLI flag or environment."""
+    if a and (getattr(a, "strict", False) or getattr(a, "gate", False)):
+        return True
+    env_strict = os.environ.get("ENGRIM_STRICT", "").strip().lower()
+    env_gate = os.environ.get("ENGRIM_GATE", "").strip().lower()
+    return env_strict in ("1", "true", "yes", "on") or env_gate in ("1", "true", "yes", "on")
 
 
 # A project root is a dir holding a VCS dir OR a `.claude` project dir. `.claude` matters because
@@ -366,7 +377,21 @@ def _row_line(r, detail: bool) -> str:
     return head
 
 
-def _recall_rows(conn, project, query, k, type_=None, include_stale=False):
+def _tag_filter_clause(col: str, tag: str | list[str] | None) -> tuple[str, list[str]]:
+    if not tag:
+        return "", []
+    tags = _csv(tag) if isinstance(tag, str) else list(tag)
+    if not tags:
+        return "", []
+    placeholders = ",".join(["?"] * len(tags))
+    clause = (f"AND (CASE WHEN json_valid({col}) "
+              f"THEN EXISTS (SELECT 1 FROM json_each({col}) WHERE LOWER(value) IN ({placeholders})) "
+              f"ELSE 0 END) ")
+    params = [t.lower() for t in tags]
+    return clause, params
+
+
+def _recall_rows(conn, project, query, k, type_=None, include_stale=False, tag=None):
     """Ranked relevant records for `query` (bm25 if FTS5 is present, else LIKE-by-recency).
 
     Query is tokenized to bare words first — that's what stops a stray "C++"/"useState()"/quote from
@@ -386,6 +411,9 @@ def _recall_rows(conn, project, query, k, type_=None, include_stale=False):
             params.append(type_)
         if not include_stale:
             sql += "AND m.status = 'active' "
+        tclause, tparams = _tag_filter_clause("m.tags", tag)
+        sql += tclause
+        params.extend(tparams)
         sql += "ORDER BY rank LIMIT ?"
         params.append(k)
         return conn.execute(sql, params).fetchall()
@@ -402,6 +430,9 @@ def _recall_rows(conn, project, query, k, type_=None, include_stale=False):
             params.append(type_)
         if not include_stale:
             sql += "AND status = 'active' "
+        tclause, tparams = _tag_filter_clause("tags", tag)
+        sql += tclause
+        params.extend(tparams)
         sql += "ORDER BY ts DESC LIMIT ?"
         params.append(k)
         return conn.execute(sql, params).fetchall()
@@ -415,6 +446,9 @@ def _recall_rows(conn, project, query, k, type_=None, include_stale=False):
         params.append(type_)
     if not include_stale:
         sql += "AND status = 'active' "
+    tclause, tparams = _tag_filter_clause("tags", tag)
+    sql += tclause
+    params.extend(tparams)
     sql += "ORDER BY ts DESC LIMIT ?"
     params.append(k)
     return conn.execute(sql, params).fetchall()
@@ -452,14 +486,15 @@ def _log_hit_line(row, query):
 
 def cmd_recall(conn, a) -> None:
     project = _resolve_project(a.project)
+    tag = getattr(a, "tag", None)
     # Hybrid (bm25 + semantic) for a real free-text query — same fusion the minder uses, so a manual
     # `recall` understands meaning too. It degrades to pure lexical when semantic is off, so behavior
-    # is unchanged without a backend. Type/stale filters use the precise lexical path (the fusion path
+    # is unchanged without a backend. Type/stale/tag filters use the precise lexical path (the fusion path
     # is active-only and unfiltered by design).
-    if a.query and not a.type and not a.include_stale:
+    if a.query and not a.type and not a.include_stale and not tag:
         rows = _minder_rows(conn, project, a.query, a.query, a.k)
     else:
-        rows = _recall_rows(conn, project, a.query, a.k, a.type, a.include_stale)
+        rows = _recall_rows(conn, project, a.query, a.k, a.type, a.include_stale, tag=tag)
 
     if a.json:
         clean = [{k: v for k, v in dict(r).items() if k not in ("rank", "_vec")} for r in rows]
@@ -1076,7 +1111,7 @@ def cmd_hook(conn, a) -> None:
         if event == "boot":
             handle_boot(db_path=getattr(a, "db", None))
         elif event == "stop":
-            handle_stop(db_path=getattr(a, "db", None))
+            handle_stop(db_path=getattr(a, "db", None), strict=_is_strict(a))
         else:
             sys.exit(f"Unknown event {event} for agent {agent}")
         return
@@ -1243,8 +1278,8 @@ Engrim provides persistent, project-scoped memory across agent sessions. It allo
 
 When Engrim MCP server is active, use these tools directly:
 
-- `engrim_recall(query, project="auto", k=5, type=None)`:
-  Run hybrid (keyword + semantic) search over project memory.
+- `engrim_recall(query, project="auto", k=5, type=None, tag=None)`:
+  Run hybrid (keyword + semantic) search over project memory. Optionally filter by record type or tag.
 - `engrim_context(project="auto", budget=4000)`:
   Fetch the session-boot memory pack (high-signal active records).
 - `engrim_add(type, summary, detail=None, tags=[])`:
@@ -1263,14 +1298,17 @@ You can also run Engrim via `run_command` in bash:
 # Add a durable decision
 engrim add -t decision -s "Chose Postgres over Mongo" --tags db
 
-# Query memory for relevant records
-engrim recall -q "database architecture"
+# Query memory for relevant records (supports --tag)
+engrim recall -q "database architecture" --tag db
 
 # View active boot pack context
 engrim context
 
-# Check if recent decisions are safe before clearing
-engrim review
+# Check if recent decisions are safe before clearing (--strict gates with exit 2)
+engrim review --strict
+
+# Purge old transcript logs and VACUUM the database
+engrim prune --keep-days 30
 
 # Perform doctor health check
 engrim doctor
@@ -1286,11 +1324,11 @@ engrim doctor
 """
 
 
-def _setup_agy(engrim_bin: str, dry_run: bool = False) -> None:
+def _setup_agy(engrim_bin: str, dry_run: bool = False, strict: bool = False) -> None:
     print("Wiring Google Antigravity environment…")
     hooks_path = os.path.expanduser("~/.gemini/config/hooks.json")
     boot_cmd = f"{engrim_bin} hook --agent agy --event boot 2>/dev/null || true"
-    stop_cmd = f"{engrim_bin} hook --agent agy --event stop >/dev/null 2>&1 || true"
+    stop_cmd = f"{engrim_bin} hook --agent agy --event stop --strict" if strict else f"{engrim_bin} hook --agent agy --event stop >/dev/null 2>&1 || true"
     if dry_run:
         print(f"[dry-run] Would wire Antigravity hooks in {hooks_path}:")
         print(f"    PreInvocation: {boot_cmd}")
@@ -1386,10 +1424,11 @@ def _setup_claude(conn, a, engrim_bin: str, dry_run: bool = False) -> None:
     print("Wiring Claude Code environment…")
     settings_path = os.path.expanduser(getattr(a, "settings", None) or "~/.claude/settings.json")
     bin_error = _verify_hook_bin(engrim_bin)
+    stop_cmd = f"{engrim_bin} log --hook --strict" if _is_strict(a) else f"{engrim_bin} log --hook >/dev/null 2>&1 || true"
     wired = {
         "SessionStart": (f"{engrim_bin} hook 2>/dev/null || true", "engrim hook"),
         "SessionEnd":   (f"{engrim_bin} sync --claude >/dev/null 2>&1 || true", "engrim sync"),
-        "Stop":         (f"{engrim_bin} log --hook >/dev/null 2>&1 || true", "engrim log"),
+        "Stop":         (stop_cmd, "engrim log"),
         "UserPromptSubmit": (f"{engrim_bin} assist 2>/dev/null || true", "engrim assist"),
     }
 
@@ -1511,7 +1550,7 @@ def cmd_setup(conn, a) -> None:
             wire_claude = True
 
     if wire_agy:
-        _setup_agy(engrim_bin, dry_run=dry_run)
+        _setup_agy(engrim_bin, dry_run=dry_run, strict=_is_strict(a))
     if wire_claude:
         _setup_claude(conn, a, engrim_bin, dry_run=dry_run)
     if wire_cursor:
@@ -2176,6 +2215,14 @@ def cmd_log(conn, a) -> None:
         project = _payload_project(payload, a.project)
         _ingest_transcript(conn, project, payload.get("transcript_path"),
                            payload.get("session_id"), a.include_thinking)
+        if _is_strict(a):
+            unc = _uncaptured_count(conn, project)
+            if unc > 0:
+                sys.stderr.write(
+                    f"[engrim] {unc} uncaptured decision(s) detected in {project} — "
+                    "capture with `engrim add` before stopping\n"
+                )
+                sys.exit(2)
         return  # silent: this runs from a hook
     project = _resolve_project(a.project)
     if getattr(a, "reindex", False):
@@ -2529,6 +2576,51 @@ def cmd_review(conn, a) -> None:
     for ts, snip in uncaptured:
         print(f"  · [{ts[:16]}] {snip[:160]}")
     print("\n  capture with:  engrim add -t decision -s \"…\"   (your agent can do this for you)")
+    if _is_strict(a):
+        sys.stderr.write(
+            f"[engrim] {len(uncaptured)} uncaptured decision(s) detected in {project} — "
+            "capture with `engrim add` before clearing\n"
+        )
+        sys.exit(2)
+
+
+def cmd_prune(conn, a) -> None:
+    """Purge old records from the transcript log table and VACUUM the database to reclaim disk space."""
+    if a.keep_days < 0:
+        sys.exit("--keep-days must be non-negative")
+
+    cutoff_dt = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=a.keep_days)
+    cutoff_iso = cutoff_dt.isoformat()
+
+    if a.all or (a.project and a.project.lower() == "all"):
+        scope_clause = ""
+        scope_params = []
+        scope_label = "all projects"
+    else:
+        project = _resolve_project(a.project)
+        scope_clause = "project = ? AND "
+        scope_params = [project]
+        scope_label = f"project={project}"
+
+    where_clause = (
+        f"WHERE {scope_clause}"
+        "(datetime(ts) < datetime(?) OR (datetime(ts) IS NULL AND ts < ?))"
+    )
+    params = scope_params + [cutoff_iso, cutoff_iso]
+
+    count_sql = f"SELECT COUNT(*) FROM log {where_clause}"
+    to_delete = conn.execute(count_sql, params).fetchone()[0]
+
+    if getattr(a, "dry_run", False):
+        print(f"prune · {to_delete} log row(s) older than {a.keep_days} day(s) would be purged "
+              f"(dry run: no changes written) · {scope_label}")
+        return
+
+    del_sql = f"DELETE FROM log {where_clause}"
+    conn.execute(del_sql, params)
+    conn.commit()
+    conn.execute("VACUUM")
+    print(f"pruned {to_delete} log row(s) older than {a.keep_days} day(s) · database vacuumed · {scope_label}")
 
 
 def cmd_embed(conn, a) -> None:
@@ -2595,6 +2687,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("-p", "--project", default="auto")
     pr.add_argument("-q", "--query")
     pr.add_argument("-t", "--type")
+    pr.add_argument("--tag", "--tags", dest="tag",
+                    help="filter memories by tag (e.g. --tag auth)")
     pr.add_argument("-k", type=int, default=8)
     pr.add_argument("--detail", action="store_true")
     pr.add_argument("--include-stale", action="store_true")
@@ -2607,6 +2701,8 @@ def build_parser() -> argparse.ArgumentParser:
     pl = sub.add_parser("list")
     pl.add_argument("-p", "--project", default="auto")
     pl.add_argument("-t", "--type")
+    pl.add_argument("--tag", "--tags", dest="tag",
+                    help="filter memories by tag (e.g. --tag auth)")
     pl.add_argument("-k", type=int, default=20)
     pl.add_argument("--detail", action="store_true")
     pl.add_argument("--include-stale", action="store_true")
@@ -2628,6 +2724,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Target agent environment (default: claude)")
     ph.add_argument("--event", choices=["boot", "stop", "sessionstart"], default=None,
                     help="Hook lifecycle event (default: boot or sessionstart)")
+    ph.add_argument("--strict", "--gate", dest="strict", action="store_true",
+                    help="gate mode: exit with code 2 if uncaptured decisions detected on stop")
     ph.set_defaults(func=cmd_hook)
 
     ps = sub.add_parser("supersede")
@@ -2640,6 +2738,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="wire Antigravity hooks, deploy skill, and register MCP server")
     pse.add_argument("--claude", dest="claude", action="store_true",
                      help="wire Claude Code SessionStart/Stop hooks and CLAUDE.md")
+    pse.add_argument("--strict", "--gate", dest="strict", action="store_true",
+                     help="configure Stop hook in strict gate mode (exit 2 on uncommitted decisions)")
     pse.add_argument("--cursor", dest="cursor", action="store_true",
                      help="add engrim MCP entry to Cursor mcp.json")
     pse.add_argument("--codex", dest="codex", action="store_true",
@@ -2705,6 +2805,8 @@ def build_parser() -> argparse.ArgumentParser:
                            "action lines for history logged before they existed)")
     plog.add_argument("--include-thinking", action="store_true",
                       help="also log assistant 'thinking' blocks (off by default; large + internal)")
+    plog.add_argument("--strict", "--gate", dest="strict", action="store_true",
+                      help="gate mode: exit with code 2 if uncaptured decisions detected on stop")
     plog.set_defaults(func=cmd_log)
 
     pas = sub.add_parser("assist")
@@ -2736,7 +2838,19 @@ def build_parser() -> argparse.ArgumentParser:
     prv.add_argument("-k", type=int, default=_CAPTURE_SCAN,
                      help=f"lean recent window of log turns to scan (default {_CAPTURE_SCAN}); the scan "
                           "always extends back to the last capture on top of this")
+    prv.add_argument("--strict", "--gate", dest="strict", action="store_true",
+                     help="gate mode: exit with code 2 if uncaptured decisions detected (blocks clear/stop)")
     prv.set_defaults(func=cmd_review)
+
+    ppr = sub.add_parser("prune", help="purge old transcript logs and VACUUM the database")
+    ppr.add_argument("-p", "--project", default="auto",
+                     help="scope pruning to a project (default: auto; use --all for all projects)")
+    ppr.add_argument("--all", action="store_true", help="prune logs across all projects")
+    ppr.add_argument("--keep-days", type=int, default=30,
+                     help="retention window in days (default: 30; older logs are purged)")
+    ppr.add_argument("--dry-run", action="store_true",
+                     help="display how many rows would be purged without modifying the database")
+    ppr.set_defaults(func=cmd_prune)
 
     sub.add_parser("projects").set_defaults(func=cmd_projects)
 

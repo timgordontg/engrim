@@ -186,7 +186,7 @@ engrim serve --mcp
 
 | Tool | Signature | Purpose |
 |---|---|---|
-| `engrim_recall` | `(query: str, project: str = "auto", k: int = 5, type: str = None)` | Hybrid (keyword + semantic) search over project memory. |
+| `engrim_recall` | `(query: str, project: str = "auto", k: int = 5, type: str = None, tag: str = None)` | Search project memory using hybrid ranking (optionally filter by type or tag). |
 | `engrim_add` | `(type: str, summary: str, detail: str = None, tags: list[str] = [])` | Write a durable memory record persisted across sessions. |
 | `engrim_context` | `(project: str = "auto", budget: int = 4000)` | Retrieve the session-boot memory pack within a character budget. |
 | `engrim_review` | `(project: str = "auto")` | Check uncaptured decisions from transcript logs before clearing. |
@@ -198,13 +198,14 @@ engrim serve --mcp
 | Command | Usage | Description |
 |---|---|---|
 | `engrim add` | `engrim add -t decision -s "..." [--origin-agent agy]` | Insert memory record (types: `decision`, `fact`, `feedback`, `state`, `user`, `reference`). |
-| `engrim recall` | `engrim recall -q "database"` | Ranked hybrid recall for the project (`--log` searches raw turns). |
+| `engrim recall` | `engrim recall -q "database" [--tag auth]` | Ranked hybrid recall for the project (`--tag` filters by tag; `--log` searches raw turns). |
 | `engrim context` | `engrim context [-b 4000]` | Priority-ordered, budget-capped session-boot pack. |
 | `engrim hook` | `engrim hook --agent agy --event boot` | Agent lifecycle hook runner for Antigravity and Claude Code. |
-| `engrim setup` | `engrim setup [--agy\|--claude\|--cursor\|--codex\|--all]` | Universal multi-agent environment configuration. |
+| `engrim setup` | `engrim setup [--agy\|--claude\|--cursor\|--codex\|--all] [--strict]` | Universal multi-agent environment configuration (`--strict` wires gate mode). |
 | `engrim serve` | `engrim serve --mcp` | Start stdio MCP server for agent integrations. |
-| `engrim review` | `engrim review` | "Safe to clear" coverage check: scans logs for uncurated decisions. |
-| `engrim list` | `engrim list [-k 20]` | List recent memories for the current project. |
+| `engrim review` | `engrim review [--strict]` | "Safe to clear" coverage check: scans logs for uncurated decisions (`--strict` exits 2 if uncaptured). |
+| `engrim prune` | `engrim prune [--keep-days 30] [--all]` | Purge old transcript logs and VACUUM the SQLite DB to reclaim disk space. |
+| `engrim list` | `engrim list [-k 20] [--tag auth]` | List recent memories for the current project (supports `--tag`). |
 | `engrim supersede`| `engrim supersede --id 12 --status superseded` | Mark a record superseded without erasing history. |
 | `engrim sync` | `engrim sync [DIR]` | Mirror markdown memories into the store (idempotent seed-once). |
 

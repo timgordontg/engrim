@@ -101,6 +101,7 @@ def handle_stop(
     *,
     db_path: str | None = None,
     print_output: bool = True,
+    strict: bool = False,
 ) -> dict:
     """Handle Antigravity Stop lifecycle hook.
 
@@ -114,17 +115,24 @@ def handle_stop(
     session_id = payload.get("conversationId") or payload.get("session_id")
 
     db = db_path or os.environ.get("ENGRIM_DB", DEFAULT_DB)
-    if transcript_path and os.path.exists(transcript_path):
-        try:
-            conn = connect(db)
+    unc = 0
+    try:
+        conn = connect(db)
+        if transcript_path and os.path.exists(transcript_path):
             _ingest_transcript(conn, project, transcript_path, session=session_id)
-            # Verify recent decisions are captured
-            unc = _uncaptured_count(conn, project)
-            if unc > 0:
-                sys.stderr.write(f"[engrim] {unc} recent decision(s) not yet curated in {project}\n")
-            conn.close()
-        except Exception as e:
-            sys.stderr.write(f"[engrim] stop hook error: {e}\n")
+        # Verify recent decisions are captured
+        unc = _uncaptured_count(conn, project)
+        if unc > 0:
+            sys.stderr.write(f"[engrim] {unc} recent decision(s) not yet curated in {project}\n")
+        conn.close()
+    except Exception as e:
+        sys.stderr.write(f"[engrim] stop hook error: {e}\n")
+
+    is_strict = strict or os.environ.get("ENGRIM_STRICT", "").strip().lower() in ("1", "true", "yes", "on") or \
+                os.environ.get("ENGRIM_GATE", "").strip().lower() in ("1", "true", "yes", "on")
+    if is_strict and unc > 0:
+        sys.stderr.write(f"[engrim] blocked stop: {unc} uncaptured decision(s) detected in {project} — capture with `engrim add` before stopping\n")
+        sys.exit(2)
 
     out: dict = {}
     if print_output:
@@ -136,10 +144,11 @@ def main() -> None:
     if len(sys.argv) < 2:
         sys.exit("Usage: python -m engrim.adapters.agy [boot|stop]")
     mode = sys.argv[1].lower()
+    strict = "--strict" in sys.argv or "--gate" in sys.argv
     if mode == "boot":
         handle_boot()
     elif mode == "stop":
-        handle_stop()
+        handle_stop(strict=strict)
     else:
         sys.exit(f"Unknown mode: {mode}")
 

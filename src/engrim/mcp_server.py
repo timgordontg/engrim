@@ -47,6 +47,8 @@ TOOLS = [
                 "k": {"type": "integer", "default": 5, "description": "Max records to return."},
                 "type": {"type": "string", "enum": list(TYPES),
                          "description": "Optional: restrict to one record type."},
+                "tag": {"type": "string",
+                        "description": "Optional: filter records by tag (e.g. 'auth')."},
                 "include_stale": {"type": "boolean", "default": False,
                                   "description": "Include superseded/archived records."},
             },
@@ -109,11 +111,12 @@ def _tool_recall(conn, args: dict) -> str:
     query = args.get("query") or ""
     k = max(0, int(args.get("k", 5)))
     type_ = args.get("type")
+    tag = args.get("tag")
     include_stale = bool(args.get("include_stale", False))
-    if query and not type_ and not include_stale:
+    if query and not type_ and not include_stale and not tag:
         rows = _minder_rows(conn, project, query, query, k)
     else:
-        rows = _recall_rows(conn, project, query, k, type_, include_stale)
+        rows = _recall_rows(conn, project, query, k, type_, include_stale, tag=tag)
     recs = [{kk: vv for kk, vv in dict(r).items() if kk not in ("rank", "_vec")} for r in rows]
     return json.dumps({"project": project, "count": len(recs), "records": recs},
                       default=str, indent=2)
