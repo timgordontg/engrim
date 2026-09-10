@@ -16,7 +16,7 @@ CLI:
   supersede mark status by id        engrim supersede --id 12 --status superseded
   projects  list tags + counts       engrim projects
   stats     row/health summary       engrim stats
-  prune     purge logs + vacuum      engrim prune [--keep-days 30] [--all]
+  prune     purge logs + vacuum      engrim prune [--keep-days <days> | --all | --vacuum]
   review    coverage check           engrim review [--strict]
 
 Every record is tagged by `project` (a folder path). `--project auto` (the default) derives it
@@ -1312,8 +1312,8 @@ engrim context
 # Check if recent decisions are safe before clearing (--strict gates with exit 2)
 engrim review --strict
 
-# Purge old transcript logs and VACUUM the database
-engrim prune --keep-days 30
+# Purge old transcript logs and VACUUM the database (opt-in retention; off by default)
+engrim prune --keep-days 90
 
 # Perform doctor health check
 engrim doctor
@@ -2590,16 +2590,52 @@ def cmd_review(conn, a) -> None:
 
 
 def cmd_prune(conn, a) -> None:
-    """Purge old records from the transcript log table and VACUUM the database to reclaim disk space."""
-    if a.keep_days < 0:
+    """Purge old records from the transcript log table and VACUUM the database to reclaim disk space.
+
+    Pruning is off by default to protect transcript history (SQLite files are small and
+    transcripts are valuable audit history). Users can explicitly pass `--keep-days <N>`,
+    set `$ENGRIM_PRUNE_KEEP_DAYS`, pass `--all`, or pass `--vacuum`.
+    """
+    keep_days = a.keep_days
+    if keep_days is None and not a.all and not getattr(a, "vacuum", False):
+        env_val = os.environ.get("ENGRIM_PRUNE_KEEP_DAYS")
+        if env_val:
+            try:
+                keep_days = int(env_val)
+            except ValueError:
+                pass
+
+    if getattr(a, "vacuum", False) and keep_days is None and not a.all:
+        conn.execute("VACUUM")
+        print("database vacuumed (no logs purged)")
+        return
+
+    if keep_days is None and not a.all:
+        sys.exit(
+            "engrim prune: pruning is off by default to prevent accidental data loss.\n"
+            "Specify --keep-days <N> (e.g. --keep-days 90) or set $ENGRIM_PRUNE_KEEP_DAYS to purge logs,\n"
+            "or pass --all to purge all transcript logs.\n"
+            "To reclaim fragmented disk space without purging any logs, use: engrim prune --vacuum"
+        )
+
+    if keep_days is not None and keep_days < 0:
         sys.exit("--keep-days must be non-negative")
 
-    cutoff_dt = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=a.keep_days)
-    cutoff_iso = cutoff_dt.isoformat()
+    if a.all and keep_days is None:
+        cutoff_clause = "1=1"
+        cutoff_params: list[str] = []
+        days_label = "all"
+    else:
+        days = keep_days if keep_days is not None else 0
+        cutoff_dt = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+        cutoff_iso = cutoff_dt.isoformat()
+        cutoff_clause = "(datetime(ts) < datetime(?) OR (datetime(ts) IS NULL AND ts < ?))"
+        cutoff_params = [cutoff_iso, cutoff_iso]
+        days_label = f"older than {days} day(s)"
 
     if a.all or (a.project and a.project.lower() == "all"):
         scope_clause = ""
-        scope_params = []
+        scope_params: list[str] = []
         scope_label = "all projects"
     else:
         project = _resolve_project(a.project)
@@ -2607,17 +2643,14 @@ def cmd_prune(conn, a) -> None:
         scope_params = [project]
         scope_label = f"project={project}"
 
-    where_clause = (
-        f"WHERE {scope_clause}"
-        "(datetime(ts) < datetime(?) OR (datetime(ts) IS NULL AND ts < ?))"
-    )
-    params = scope_params + [cutoff_iso, cutoff_iso]
+    where_clause = f"WHERE {scope_clause}{cutoff_clause}"
+    params = scope_params + cutoff_params
 
     count_sql = f"SELECT COUNT(*) FROM log {where_clause}"
     to_delete = conn.execute(count_sql, params).fetchone()[0]
 
     if getattr(a, "dry_run", False):
-        print(f"prune · {to_delete} log row(s) older than {a.keep_days} day(s) would be purged "
+        print(f"prune · {to_delete} log row(s) {days_label} would be purged "
               f"(dry run: no changes written) · {scope_label}")
         return
 
@@ -2625,7 +2658,7 @@ def cmd_prune(conn, a) -> None:
     conn.execute(del_sql, params)
     conn.commit()
     conn.execute("VACUUM")
-    print(f"pruned {to_delete} log row(s) older than {a.keep_days} day(s) · database vacuumed · {scope_label}")
+    print(f"pruned {to_delete} log row(s) {days_label} · database vacuumed · {scope_label}")
 
 
 def cmd_embed(conn, a) -> None:
@@ -2848,12 +2881,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="gate mode: exit with code 2 if uncaptured decisions detected (blocks clear/stop)")
     prv.set_defaults(func=cmd_review)
 
-    ppr = sub.add_parser("prune", help="purge old transcript logs and VACUUM the database")
+    ppr = sub.add_parser("prune", help="purge old transcript logs and VACUUM the database (opt-in)")
     ppr.add_argument("-p", "--project", default="auto",
                      help="scope pruning to a project (default: auto; use --all for all projects)")
-    ppr.add_argument("--all", action="store_true", help="prune logs across all projects")
-    ppr.add_argument("--keep-days", type=int, default=30,
-                     help="retention window in days (default: 30; older logs are purged)")
+    ppr.add_argument("--all", action="store_true", help="prune logs across all projects (or all logs if no --keep-days)")
+    ppr.add_argument("--keep-days", type=int, default=None,
+                     help="retention window in days (e.g. --keep-days 30; older logs are purged; off by default)")
+    ppr.add_argument("--vacuum", action="store_true",
+                     help="reclaim disk space via VACUUM without purging any logs")
     ppr.add_argument("--dry-run", action="store_true",
                      help="display how many rows would be purged without modifying the database")
     ppr.set_defaults(func=cmd_prune)

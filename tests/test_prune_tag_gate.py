@@ -107,6 +107,73 @@ def test_prune_negative_keep_days_errors(tmp_path):
         main(["--db", str(db), "prune", "-p", "/p", "--keep-days", "-5"])
 
 
+def test_prune_default_is_off_leaves_data_untouched(tmp_path, capsys):
+    db = tmp_path / "m.db"
+    now = dt.datetime.now(dt.timezone.utc)
+    old_ts = (now - dt.timedelta(days=120)).isoformat()
+    _insert_log_with_ts(str(db), "/p", old_ts, "valuable historical turn from 120 days ago")
+
+    # Calling prune without retention flag fails safe
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(db), "prune", "-p", "/p"])
+    assert exc.value.code != 0
+    assert "pruning is off by default" in str(exc.value)
+
+    # Log table is completely untouched
+    c = sqlite3.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM log WHERE project='/p'").fetchone()[0] == 1
+    c.close()
+
+
+def test_prune_vacuum_leaves_logs_intact(tmp_path, capsys):
+    db = tmp_path / "m.db"
+    now = dt.datetime.now(dt.timezone.utc)
+    old_ts = (now - dt.timedelta(days=120)).isoformat()
+    _insert_log_with_ts(str(db), "/p", old_ts, "valuable log")
+
+    capsys.readouterr()
+    main(["--db", str(db), "prune", "--vacuum"])
+    out = capsys.readouterr().out
+    assert "database vacuumed (no logs purged)" in out
+
+    c = sqlite3.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM log").fetchone()[0] == 1
+    c.close()
+
+
+def test_prune_all_flag_without_keep_days(tmp_path, capsys):
+    db = tmp_path / "m.db"
+    now = dt.datetime.now(dt.timezone.utc)
+    _insert_log_with_ts(str(db), "/p", now.isoformat(), "current log")
+
+    capsys.readouterr()
+    main(["--db", str(db), "prune", "--all"])
+    out = capsys.readouterr().out
+    assert "pruned 1 log row(s) all · database vacuumed" in out
+
+    c = sqlite3.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM log").fetchone()[0] == 0
+    c.close()
+
+
+def test_prune_env_variable_keep_days(tmp_path, capsys, monkeypatch):
+    db = tmp_path / "m.db"
+    now = dt.datetime.now(dt.timezone.utc)
+    old_ts = (now - dt.timedelta(days=45)).isoformat()
+    _insert_log_with_ts(str(db), "/p", old_ts, "45-day old log")
+
+    monkeypatch.setenv("ENGRIM_PRUNE_KEEP_DAYS", "30")
+    capsys.readouterr()
+    main(["--db", str(db), "prune", "-p", "/p"])
+    out = capsys.readouterr().out
+    assert "pruned 1 log row(s) older than 30 day(s)" in out
+
+    c = sqlite3.connect(db)
+    assert c.execute("SELECT COUNT(*) FROM log WHERE project='/p'").fetchone()[0] == 0
+    c.close()
+
+
+
 # ==============================================================================
 # 2. --tag filter on recall tests
 # ==============================================================================
