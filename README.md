@@ -217,6 +217,7 @@ the reviewed log. It does not verify that logging captured the entire session.
 | `engrim project` | `engrim project [-p PROJECT \| --global \| --all] [--json]` | Records, active count and last write for one project tag (the current one by default), or every tag with `--all`. |
 | `engrim projects` | `engrim projects [--json]` | Every project's counts — the same as `engrim project --all`. |
 | `engrim supersede`| `engrim supersede --id 12 --status superseded` | Mark a record superseded without erasing history. |
+| `engrim retire` | `engrim retire [--all] [--dry-run] [--json]` | Mark the active `resume-pointer` record(s) done once their work is finished (never erases). |
 | `engrim sync` | `engrim sync [DIR]` | Mirror markdown memories into the store (idempotent seed-once). |
 | `engrim merge` | `engrim merge OTHER.db [--dry-run]` | Fold another store's records into this one (content-keyed, idempotent; retirements carry over). |
 | `engrim backup` | `engrim backup COPY.db [--force] [--json]` | Consistent copy of the whole store via SQLite's online backup API (safe while agents hold it open). |
@@ -226,7 +227,7 @@ the reviewed log. It does not verify that logging captured the entire session.
 ## 8. Continue-As-Clear Workflow
 
 1. **Capture as you work**: Whenever a major decision or architectural rule is made, it needs to be saved to memory. The AI agent will often do this automatically via the `engrim_add` tool, but you can also manually intervene by running `engrim add` yourself.
-2. **Use `resume-pointer`**: Before ending a session or clearing, add a record tagged `resume-pointer` describing the immediate next task. The newest pointer is pinned under `[▶ RESUME HERE]` at the top of the next session's boot pack.
+2. **Use `resume-pointer`**: Before ending a session or clearing, add a record tagged `resume-pointer` describing the immediate next task. The newest pointer is pinned under `[▶ RESUME HERE]` at the top of the next session's boot pack. When that work is done, `engrim retire` marks the pointer(s) `done` so a finished task never leads a later pack.
 3. **Verify with `engrim review`**: Check that all recent decisions are captured.
 4. **Clear freely (`/clear`)**: The session window is wiped clean; `engrim` automatically re-injects the active memory pack on the next prompt or invocation.
 

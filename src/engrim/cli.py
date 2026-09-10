@@ -14,6 +14,7 @@ CLI:
   setup     wire the hook + notes     engrim setup           (white-glove one-shot install)
   list      recent for a project     engrim list [-k 20] [--tag auth]
   supersede mark status by id        engrim supersede --id 12 --status superseded
+  retire    close resume-pointers    engrim retire [-p P | --all] [--dry-run] [--json]
   project   tag + counts             engrim project [-p P | --global | --all] [--json]
   projects  list tags + counts       engrim projects [--json]   (= project --all)
   stats     row/health summary       engrim stats
@@ -1164,6 +1165,46 @@ def cmd_supersede(conn, a) -> None:
     n = conn.execute("UPDATE memories SET status=? WHERE id=?", (a.status, a.id)).rowcount
     conn.commit()
     print(f"updated {n} row(s): #{a.id} -> {a.status}")
+
+
+def cmd_retire(conn, a) -> None:
+    """Mark every active resume-pointer `done` — the records the boot pack would pin under
+    [▶ RESUME HERE], selected by the same predicate (`_is_resume`) so the two can't disagree.
+
+    A pointer says where one session left off. Once that work is finished, or the store moves
+    somewhere that working tree no longer exists (a CI runner folding a run's store into the
+    shared one), an active pointer would lead the next session's pack as if it were its own.
+    engrim never retires one on its own, since it can't know the work is done; this is the hand
+    that does. `done` is the same monotonic move `supersede` makes: nothing is erased, the record
+    stays readable with --include-stale, and `merge` carries the retirement to other copies.
+    Scoped to exactly one project like every other write (`prune`, `embed`), so a pointer written
+    to the global layer — which the pack pins in every project — takes `-p __global__` or `--all`."""
+    if a.all:
+        project = None
+        rows = conn.execute(
+            "SELECT * FROM memories WHERE status = 'active' ORDER BY id").fetchall()
+        scope = "all projects"
+    else:
+        project = _resolve_project(a.project)
+        rows = conn.execute(
+            "SELECT * FROM memories WHERE project = ? AND status = 'active' ORDER BY id",
+            (project,)).fetchall()
+        scope = f"project={project}"
+    pointers = [r for r in rows if _is_resume(r)]
+    if pointers and not a.dry_run:
+        clause, ids = _in_clause([r["id"] for r in pointers], "id")
+        conn.execute(f"UPDATE memories SET status = 'done' WHERE {clause}", ids)
+        conn.commit()
+    if a.json:
+        status = "active" if a.dry_run else "done"     # the rows were read before the update
+        print(json.dumps({"retired": len(pointers), "dry_run": a.dry_run, "project": project,
+                          "pointers": [{**dict(r), "status": status} for r in pointers]},
+                         default=str))
+        return
+    head = "DRY-RUN — no changes written; would retire" if a.dry_run else "retired"
+    print(f"{head} {len(pointers)} resume-pointer(s) · {scope}")
+    for r in pointers:
+        print(f"  #{r['id']} {r['ts'][:16]}  {(r['summary'] or '')[:80]}")
 
 
 def cmd_project(conn, a) -> None:
@@ -2989,6 +3030,14 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--id", type=int, required=True)
     ps.add_argument("--status", default="superseded")
     ps.set_defaults(func=cmd_supersede)
+
+    prt = sub.add_parser("retire", help="mark the active resume-pointer(s) done (this project, or --all)")
+    prt.add_argument("-p", "--project", default="auto",
+                     help="scope to a project (default: auto; use --all for every project)")
+    prt.add_argument("--all", action="store_true", help="retire pointers across all projects")
+    prt.add_argument("--dry-run", action="store_true", help="list what would be retired, write nothing")
+    prt.add_argument("--json", action="store_true")
+    prt.set_defaults(func=cmd_retire)
 
     pse = sub.add_parser("setup", help="wire engrim into agent environments (Antigravity, Claude, Cursor)")
     pse.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
