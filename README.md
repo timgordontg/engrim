@@ -47,7 +47,7 @@ graph TD
         CODEX["Codex CLI<br/>(Hooks & MCP)"]
     end
 
-    subgraph CoreEngine ["engrim Core Engine (v1.3.0)"]
+    subgraph CoreEngine ["engrim Core Engine (v1.4.0)"]
         ADAPTERS["Adapters & Hooks<br/>(agy, claude, mcp)"]
         PROVENANCE["Agent Provenance Engine<br/>(origin_agent tracking)"]
         ROUTER["Hybrid Retrieval & Minder<br/>(bm25 lexical + vector cosine)"]
