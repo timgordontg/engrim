@@ -14,7 +14,8 @@ CLI:
   setup     wire the hook + notes     engrim setup           (white-glove one-shot install)
   list      recent for a project     engrim list [-k 20] [--tag auth]
   supersede mark status by id        engrim supersede --id 12 --status superseded
-  projects  list tags + counts       engrim projects
+  project   tag + counts             engrim project [-p P | --global | --all] [--json]
+  projects  list tags + counts       engrim projects [--json]   (= project --all)
   stats     row/health summary       engrim stats
   prune     purge logs + vacuum      engrim prune [--keep-days <days> | --all | --vacuum]
   backup    consistent copy          engrim backup COPY.db [--force] [--json]   (safe while agents hold the store)
@@ -1165,15 +1166,29 @@ def cmd_supersede(conn, a) -> None:
     print(f"updated {n} row(s): #{a.id} -> {a.status}")
 
 
-def cmd_projects(conn, a) -> None:
+def cmd_project(conn, a) -> None:
+    """One line per project tag: records, active records, last write. Scoped like every other
+    read — the cwd's project by default, `-p` for another, `--global` for the user-layer — with
+    `--all` for every project in the store. `engrim projects` is that last form by name (its
+    subparser sets all=True), so the plural keeps listing the whole store as it always has.
+    `--json` gives the same rows as a list of objects."""
+    if a.all:
+        where, params, scope = "", (), "all projects"
+    else:
+        project = GLOBAL_PROJECT if a.globl else _resolve_project(a.project)
+        where, params, scope = "WHERE project = ? ", (project,), f"project={project}"
     rows = conn.execute(
         "SELECT project, COUNT(*) n, SUM(status='active') active, MAX(ts) last "
-        "FROM memories GROUP BY project ORDER BY last DESC"
+        f"FROM memories {where}GROUP BY project ORDER BY last DESC", params
     ).fetchall()
+    if a.json:
+        print(json.dumps([{"project": r["project"], "records": r["n"], "active": r["active"],
+                           "last": r["last"]} for r in rows]))
+        return
     for r in rows:
         print(f"{r['n']:4d} ({r['active']} active)  last {r['last'][:16]}  {r['project']}")
     if not rows:
-        print("(empty store)")
+        print("(empty store)" if a.all else f"(no records for {scope})")
 
 
 def _est_tokens(chars: int) -> int:
@@ -3110,7 +3125,19 @@ def build_parser() -> argparse.ArgumentParser:
                      help="display how many rows would be purged without modifying the database")
     ppr.set_defaults(func=cmd_prune)
 
-    sub.add_parser("projects").set_defaults(func=cmd_projects)
+    ppj = sub.add_parser("project", help="records, active and last write for a project tag")
+    scope = ppj.add_mutually_exclusive_group()
+    scope.add_argument("-p", "--project", default="auto",
+                       help="one project tag (default: auto, the current directory's)")
+    scope.add_argument("-g", "--global", dest="globl", action="store_true",
+                       help="the global user-layer only")
+    scope.add_argument("--all", action="store_true", help="every project in the store")
+    ppj.add_argument("--json", action="store_true")
+    ppj.set_defaults(func=cmd_project)
+
+    ppjs = sub.add_parser("projects", help="every project's records, active and last write (= project --all)")
+    ppjs.add_argument("--json", action="store_true")
+    ppjs.set_defaults(func=cmd_project, project=None, globl=False, all=True)
 
     pst = sub.add_parser("stats")
     pst.add_argument("-p", "--project", default="auto")
