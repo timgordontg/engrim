@@ -246,6 +246,17 @@ There are several other memory solutions and coding assistants out there (such a
 
 ---
 
-## 11. License
+## 11. Author & Contact
+
+Created by **Tim Gordon** ([@timgordontg](https://github.com/timgordontg)).
+- **LinkedIn:** [linkedin.com/in/timgordon1](https://www.linkedin.com/in/timgordon1)
+- **Email:** [timgordontg@gmail.com](mailto:timgordontg@gmail.com)
+
+Open to collaborations and Staff / Senior engineering opportunities in Agentic AI, Developer Tooling, and Systems Engineering.
+
+---
+
+## 12. License
 
 MIT © 2026 Tim Gordon.
+
