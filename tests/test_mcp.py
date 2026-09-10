@@ -155,3 +155,17 @@ def test_review_reassesses_after_logging_starts(tmp_path):
         result = _review(conn)
         assert result["safe_to_clear"] is False
         assert result["uncaptured_count"] == 1
+
+
+def test_bare_engrim_invoked_over_stdio_runs_mcp_server(tmp_path, monkeypatch, capsys):
+    from engrim.cli import main
+    db_path = str(tmp_path / "m.db")
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n"
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    main(["--db", db_path])
+    out = capsys.readouterr().out
+    resp = json.loads(out.strip())
+    assert resp["id"] == 1
+    assert resp["result"]["serverInfo"]["name"] == "engrim"
+

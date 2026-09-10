@@ -2962,7 +2962,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--db", default=os.environ.get("ENGRIM_DB", DEFAULT_DB),
                    help="SQLite store path (or set $ENGRIM_DB)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
 
     pa = sub.add_parser("add")
     pa.add_argument("-p", "--project", default="auto")
@@ -3226,7 +3226,21 @@ def main(argv=None) -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass                       # not a TextIOWrapper (captured/redirected in-process) — fine
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        if not sys.stdin.isatty():
+            # Automated stdio launcher (e.g. MCP proxy/runner like Glama, Cursor, Windsurf)
+            # running `engrim` without arguments: default directly to stdio MCP server.
+            from engrim.mcp_server import serve
+            conn = connect(args.db)
+            try:
+                serve(conn)
+            finally:
+                conn.close()
+            return
+        parser.print_help()
+        sys.exit(0)
     if getattr(args, "k", None) is not None:
         args.k = max(0, args.k)        # a negative LIMIT would dump the whole store
     if getattr(args, "budget", None) is not None:
