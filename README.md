@@ -148,6 +148,9 @@ engrim setup --all
 
 *(Use `--dry-run` with any setup command to inspect changes without modifying disk).*
 
+#### GitHub Actions (gh-aw)
+See [`examples/gh-aw/`](examples/gh-aw/) for engrim inside [GitHub Agentic Workflows](https://github.github.com/gh-aw/): memory across runs through artifacts and `engrim merge`, and a continue-as-clear restart instead of auto-compaction.
+
 ---
 
 ## 5. Agent Provenance Tracking

@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "\"$HOME\"/.claude/hooks/context-restart.sh start" }] }],
+    "PreCompact":   [{ "hooks": [{ "type": "command", "command": "\"$HOME\"/.claude/hooks/context-restart.sh precompact" }] }],
+    "PostToolUse":  [{ "hooks": [{ "type": "command", "command": "\"$HOME\"/.claude/hooks/context-restart.sh posttool" }] }],
+    "Stop":         [{ "hooks": [{ "type": "command", "command": "\"$HOME\"/.claude/hooks/context-restart.sh stop" }] }],
+    "StopFailure":  [{ "hooks": [{ "type": "command", "command": "\"$HOME\"/.claude/hooks/context-restart.sh stopfailure" }] }]
+  }
+}

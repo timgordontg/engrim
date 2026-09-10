@@ -1,0 +1,143 @@
+# Serializes the merges of the agent's memory store.
+#
+# issue-triage.md uploads its engrim store at the end of every run as
+# `engrim-memory-run-<run id>`. This workflow runs once per completed run of
+# it and folds that run's store into the canonical `engrim-memory` artifact
+# with `engrim merge`, then deletes it. It is the only writer of the canonical
+# artifact, and its concurrency group lets GitHub run at most one copy at a
+# time, with `queue: max` keeping every pending run — so two agent runs that
+# end together get two merges, in order, never a lost upload. Artifacts have
+# no compare-and-swap; this queue is the serialization. A merge that fails
+# leaves that run's store where it was (7-day retention); `workflow_dispatch`
+# with the run id folds it by hand.
+#
+# After the fold, every active `resume-pointer` in the canonical store is
+# retired (status `done`, .github/lib/engrim/store.py). A pointer describes a working tree that no longer
+# exists, and this is the only writer of the store, so a run seeded from the
+# canonical artifact can never mistake an earlier job's pointer for its own.
+# That holds on the first fold too, where the run's store becomes the
+# canonical one without a merge. engrim pins the newest pointer in the boot
+# pack and never retires one, so this is the one place that does. Re-folding
+# a store by hand keeps it: merge only carries a status onto a record that
+# is still active on this side.
+#
+# workflow_run fires only for workflow files on the default branch. Add every
+# agentic workflow that captures a store to the `workflows:` list.
+name: Memory merge
+
+on:
+  workflow_run:
+    workflows: ["Issue triage"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The agent run whose engrim-memory-run-<id> artifact to fold"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engrim-memory-merge
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  merge:
+    name: Fold the run's store into engrim-memory
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Listing and downloading artifacts needs read; deleting the folded run
+      # artifact needs write. Nothing here touches contents.
+      actions: write
+      contents: read
+    env:
+      # The same wheel issue-triage.md stages for the MCP server. Move both together.
+      ENGRIM_VERSION: 1.3.2
+      ENGRIM_SHA256: a6c067c6014532412d91a3843074a8d6668f52b617d0f6d8566541adca122602
+      ENGRIM_WHEEL_URL: https://files.pythonhosted.org/packages/5f/77/5aea3231a32c51328bcc7efd6a7600e6ed7b299ab3abf74fe9b908c8d27b/engrim-1.3.2-py3-none-any.whl
+      # The same image the agent workflow uses for the store: its sqlite has
+      # FTS5, which the store's triggers need on every insert.
+      IMG: python:3.13.15-alpine3.24
+    steps:
+      # For .github/lib/artifact.py and .github/lib/engrim/store.py, the scripts the agent
+      # workflow uses for the same jobs.
+      - uses: actions/checkout@v7
+
+      - name: Stage the engrim wheel
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/engrim-merge"
+          rm -rf "${root}"
+          mkdir -p "${root}/site" "${root}/in" "${root}/out"
+          wheel="${root}/engrim-${ENGRIM_VERSION}-py3-none-any.whl"
+          curl --fail --silent --show-error --location --retry 3 -o "${wheel}" "${ENGRIM_WHEEL_URL}"
+          echo "${ENGRIM_SHA256}  ${wheel}" | sha256sum --check --strict
+          python3 -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "${wheel}" "${root}/site"
+          chmod -R a+rX "${root}/site"
+
+      - name: Fold the completed run's store into the canonical store
+        id: fold
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/engrim-merge"
+          lib=.github/lib
+          # artifact.py answers 0 with the id, 3 when there is no such
+          # artifact, and fails otherwise — and a failure must fail this step:
+          # mistaking an API error for "no canonical store yet" would upload
+          # this one run's store as the canonical one.
+          rc=0; folded="$(python3 "${lib}/artifact.py" "engrim-memory-run-${RUN_ID}" "${root}/in")" || rc=$?
+          if [ "${rc}" -eq 3 ]; then
+            echo "run ${RUN_ID} uploaded no memory store; nothing to fold"
+            echo "changed=false" >> "$GITHUB_OUTPUT"; echo "folded=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "${rc}" -eq 0 ] || exit "${rc}"
+          mv -f "${root}/in/memory.db" "${root}/in/run.db"
+          rc=0; python3 "${lib}/artifact.py" engrim-memory "${root}/out" >/dev/null || rc=$?
+          if [ "${rc}" -eq 0 ]; then
+            # Read-write mounts on purpose: the stores are WAL-mode and SQLite
+            # needs the -shm file even to read one; `merge` never writes its source.
+            docker run --rm -v "${root}/site:/opt/engrim:ro" -v "${root}/out:/out" -v "${root}/in:/in" \
+              -e PYTHONPATH=/opt/engrim -e ENGRIM_EMBED=off "${IMG}" \
+              python -c "from engrim.cli import main; main(['--db', '/out/memory.db', 'merge', '/in/run.db', '--verbose'])"
+          elif [ "${rc}" -eq 3 ]; then
+            mv -f "${root}/in/run.db" "${root}/out/memory.db"
+            echo "no canonical store yet: this run's store becomes it"
+          else
+            exit "${rc}"
+          fi
+          # Retire the pointers the folded run left behind (the script goes in
+          # on stdin: nothing to mount), then drop the WAL side files.
+          docker run -i --rm -v "${root}/out:/out" "${IMG}" python - retire /out/memory.db < "${lib}/engrim/store.py"
+          rm -f "${root}/out/memory.db-wal" "${root}/out/memory.db-shm"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "folded=${folded}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the canonical store as the engrim-memory artifact
+        id: upload
+        if: steps.fold.outputs.changed == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: engrim-memory
+          path: ${{ runner.temp }}/engrim-merge/out/memory.db
+          retention-days: 30
+          if-no-files-found: error
+
+      # Only after the upload succeeded: a folded store that is still an
+      # artifact can be folded again by hand; a deleted one that was never
+      # uploaded would be lost.
+      - name: Delete the run store that was folded
+        if: steps.fold.outputs.changed == 'true' && steps.upload.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FOLDED: ${{ steps.fold.outputs.folded }}
+        run: |
+          curl -sS -o /dev/null -w "delete artifact ${FOLDED}: HTTP %{http_code}\n" -X DELETE \
+            -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${FOLDED}"
