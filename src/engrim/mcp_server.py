@@ -35,57 +35,67 @@ DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 TOOLS = [
     {
         "name": "engrim_recall",
-        "description": ("Search this project's engrim memory for records relevant to a query "
-                        "(hybrid keyword + semantic ranking). Use before non-trivial work to "
-                        "recall prior decisions, facts, feedback, and state."),
+        "description": ("Read-only query: Search this project's engrim memory for records relevant to a query "
+                        "using hybrid BM25 keyword and semantic vector ranking. Use before starting non-trivial work to "
+                        "recall prior architectural decisions, technical facts, user feedback, and project state. "
+                        "Safe to invoke repeatedly with zero mutations or side effects."),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Free-text topic to search for."},
+                "query": {"type": "string", "description": "Free-text topic or search keywords."},
                 "project": {"type": "string", "default": "auto",
-                            "description": "Project tag; 'auto' = current working directory."},
-                "k": {"type": "integer", "default": 5, "description": "Max records to return."},
+                            "description": "Project identifier tag; 'auto' infers from current working directory repository root."},
+                "k": {"type": "integer", "default": 5, "description": "Maximum number of records to return (default 5)."},
                 "type": {"type": "string", "enum": list(TYPES),
-                         "description": "Optional: restrict to one record type."},
+                         "description": "Optional filter by memory type ('decision', 'fact', 'feedback', 'state', 'reference', 'user')."},
                 "tag": {"type": "string",
-                        "description": "Optional: filter records by tag (e.g. 'auth')."},
+                        "description": "Optional filter by tag name (e.g. 'auth', 'database')."},
                 "include_stale": {"type": "boolean", "default": False,
-                                  "description": "Include superseded/archived records."},
+                                  "description": "Include superseded or retired records alongside active records."},
             },
             "required": ["query"],
         },
     },
     {
         "name": "engrim_context",
-        "description": ("Return the project's session-boot memory pack — the curated, high-signal "
-                        "records that orient you at the start of work, within a character budget."),
+        "description": ("Read-only query: Return this project's curated session-boot memory pack (high-signal "
+                        "architectural decisions, active constraints, and conventions) to orient an agent at the "
+                        "start of a session or after clearing context. Safe to call repeatedly with zero mutations or "
+                        "external side effects. Records are prioritized and truncated to strictly fit within the specified "
+                        "character budget."),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project": {"type": "string", "default": "auto"},
+                "project": {"type": "string", "default": "auto",
+                            "description": "Project identifier tag; 'auto' infers from current working directory repository root."},
                 "budget": {"type": "integer", "default": 4000,
-                           "description": "Character budget for the pack."},
+                           "description": "Maximum character budget for the returned memory pack (default 4000). Prioritizes active decisions and constraints."},
             },
+            "required": [],
         },
     },
     {
         "name": "engrim_add",
-        "description": ("Write a durable memory record so it persists across sessions. Use at real "
-                        "decision points and for durable facts/feedback/state."),
+        "description": ("Write operation: Save a durable memory record to local SQLite storage so it persists across "
+                        "sessions and agent restarts. Call this whenever a non-trivial architectural choice, durable fact, "
+                        "user constraint, or state milestone is established. Appends a new record to the project memory database."),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "type": {"type": "string", "enum": list(TYPES)},
-                "summary": {"type": "string", "description": "One-line headline for the record."},
-                "detail": {"type": "string", "description": "Optional longer body / the why."},
-                "tags": {"type": "array", "items": {"type": "string"}},
-                "project": {"type": "string", "default": "auto"},
+                "type": {"type": "string", "enum": list(TYPES),
+                         "description": "Category of memory: 'decision' (architectural choices), 'fact' (project truths), 'feedback' (user preferences), 'state' (progress milestones), 'reference' (external links), or 'user' (durable user constraints)."},
+                "summary": {"type": "string", "description": "Concise one-line headline summarizing the record."},
+                "detail": {"type": "string", "description": "Optional detailed explanation, context, trade-offs, or rationale."},
+                "tags": {"type": "array", "items": {"type": "string"},
+                         "description": "Optional list of categorical string tags (e.g. ['auth', 'api'])."},
+                "project": {"type": "string", "default": "auto",
+                            "description": "Project identifier tag; 'auto' infers from current working directory repository root."},
                 "global": {"type": "boolean", "default": False,
-                           "description": "Write to the global user-layer that loads in every project."},
+                           "description": "If true, stores in the global user-layer (~/.engrim/memory.db) accessible across all projects."},
                 "origin_agent": {
                     "type": "string",
                     "enum": list(ORIGIN_AGENTS),
-                    "description": "Origin agent identifier for provenance tracking.",
+                    "description": "Origin agent identifier for provenance tracking ('antigravity', 'claude-code', 'cursor', 'cli', 'user').",
                 },
             },
             "required": ["type", "summary"],
@@ -93,16 +103,16 @@ TOOLS = [
     },
     {
         "name": "engrim_review",
-        "description": ("Check coverage before clearing context: surface recent decisions from "
-                        "the transcript log that don't appear to be in curated memory yet. "
-                        "safe_to_clear is null (unknown) when this project has no transcript log; "
-                        "otherwise it is a boolean heuristic verdict about the available log."),
+        "description": ("Read-only check: Inspect conversation and flight recorder history before clearing context to "
+                        "surface recent architectural decisions not yet saved to curated memory. Safe to call with no side "
+                        "effects. Returns heuristic verdict (safe_to_clear: true/false/null) and uncaptured candidate records."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "project": {"type": "string", "default": "auto",
-                            "description": "Project tag; 'auto' = current working directory."},
+                            "description": "Project identifier tag; 'auto' infers from current working directory repository root."},
             },
+            "required": [],
         },
     },
 ]
