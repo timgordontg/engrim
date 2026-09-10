@@ -46,6 +46,11 @@ concurrency:
 jobs:
   merge:
     name: Fold the run's store into engrim-memory
+    # workflow_run fires for every conclusion, and a run whose activation gate
+    # skipped completes as `skipped` with nothing uploaded. Only `skipped` is
+    # excluded: a failed run still ran its capture (the post-step is
+    # `if: always()`) and its store must be folded.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
