@@ -5,6 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Local & private](https://img.shields.io/badge/local-%26%20private-brightgreen)](#security--privacy)
+[![Glama](https://glama.ai/mcp/servers/timgordontg/engrim/badges/score.svg)](https://glama.ai/mcp/servers/timgordontg/engrim)
 
 **The Universal Cross-Model & Cross-Agent Episodic Memory Store.**
 
