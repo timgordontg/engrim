@@ -285,3 +285,12 @@ def test_agy_stop_hook_strict_exits_code_2(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         main(["--db", str(db), "hook", "--agent", "agy", "--event", "stop", "--strict", "-p", "/p"])
     assert exc.value.code == 2
+
+
+def test_cli_version_flag(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "engrim 1.3.1" in out
+

@@ -34,6 +34,11 @@ import shutil
 import sqlite3
 import sys
 
+try:
+    from engrim import __version__
+except ImportError:
+    __version__ = "1.3.1"
+
 DEFAULT_DB = os.path.expanduser("~/.engrim/memory.db")
 TYPES = ("decision", "fact", "feedback", "state", "reference", "user")
 STATUSES = ("active", "superseded", "done")
@@ -2662,6 +2667,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--db", default=os.environ.get("ENGRIM_DB", DEFAULT_DB),
                    help="SQLite store path (or set $ENGRIM_DB)")
     sub = p.add_subparsers(dest="cmd", required=True)
