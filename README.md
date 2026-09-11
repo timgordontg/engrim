@@ -263,7 +263,7 @@ Created by **Tim Gordon** ([@timgordontg](https://github.com/timgordontg)).
 - **LinkedIn:** [linkedin.com/in/timgordon1](https://www.linkedin.com/in/timgordon1)
 - **Email:** [timgordontg@gmail.com](mailto:timgordontg@gmail.com)
 
-Open to collaborations and Staff / Senior engineering opportunities in Agentic AI, Developer Tooling, and Systems Engineering.
+Founder & Creator @ Engrim. Raising a $2.0M Seed round for In-VPC Autonomous CI infrastructure. Enterprise inquiries & collaborations: timgordontg@gmail.com
 
 ---
 
