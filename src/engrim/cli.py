@@ -742,12 +742,11 @@ def cmd_assist(conn, a) -> None:
 
 
 def cmd_statusline(conn, a) -> None:
-    """Ambient status line for Claude Code (settings.json `statusLine`). Prints ONE compact line so the
-    user can SEE engrim is live and working for this project — in the status bar, never in the chat. That
-    answers "what did I just install / is this thing even doing anything?" without muddying the exchange
-    or nagging a security-aware user. Reads Claude Code's session JSON on stdin (for the workspace dir),
-    falls back to cwd. Fast + model-free: it only counts rows + reads meta, so it's safe to run on every
-    status refresh."""
+    """Print one compact engrim status line for hosts with a command status-line slot.
+
+    Claude Code invokes this from `settings.json.statusLine`; Codex-shaped hook/session payloads are
+    also accepted so callers can use the same status command when a host exposes a command slot.
+    """
     data, sess = {}, None
     try:
         data = json.load(sys.stdin) or {}
@@ -1124,6 +1123,21 @@ def cmd_hook(conn, a) -> None:
             sys.exit(f"Unknown event {event} for agent {agent}")
         return
 
+    if agent == "codex":
+        # Codex supplies the stable workspace path as `cwd` and expects the same JSON hook output
+        # shape as Claude Code. Do not run Claude's file-memory seed or transcript-directory sweep:
+        # those paths are Claude-specific and would silently point Codex at the wrong store.
+        payload = {}
+        try:
+            payload = json.load(sys.stdin) or {}
+        except Exception:
+            pass
+        a.project = _payload_project(payload, a.project)
+        event = getattr(a, "event", None) or "sessionstart"
+        if event not in ("boot", "sessionstart"):
+            sys.exit(f"Unknown event {event} for agent {agent}")
+        a.no_sync = True
+
     import contextlib
     import io
     # ONE-TIME context build: the very first session for a project seeds the store from Claude
@@ -1482,6 +1496,110 @@ def _setup_cursor(engrim_bin: str, dry_run: bool = False) -> None:
         print(f"✓ registered Cursor MCP entry in {cursor_mcp}")
 
 
+def _codex_home() -> str:
+    """Return the Codex home directory, honoring the same override Codex uses."""
+    return os.path.abspath(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"))
+
+
+def _codex_hook_commands(engrim_bin: str):
+    """Commands for the Codex-native hook events.
+
+    Codex sends one JSON object on stdin for every command hook. The command hooks deliberately
+    swallow helper failures so a local memory integration can never interrupt the coding session.
+    The hook itself still emits Codex-compatible JSON on the two context-producing events.
+    """
+    return {
+        "SessionStart": (
+            f"{engrim_bin} hook --agent codex --event sessionstart 2>/dev/null || true",
+            20,
+        ),
+        "SessionEnd": (
+            f"{engrim_bin} log --hook --agent codex 2>/dev/null || true",
+            3,
+        ),
+        "Stop": (
+            f"{engrim_bin} log --hook --agent codex 2>/dev/null || true",
+            30,
+        ),
+        "UserPromptSubmit": (
+            f"{engrim_bin} assist 2>/dev/null || true",
+            20,
+        ),
+    }
+
+
+def _setup_codex(engrim_bin: str, dry_run: bool = False) -> None:
+    """Wire Codex to engrim through command hooks.
+
+    MCP is intentionally not part of this path. Codex can run the same local CLI commands as Claude
+    Code, while MCP remains an optional manual integration for users who want model-invoked tools.
+    """
+    print("Wiring Codex CLI environment…")
+    hooks_path = os.path.join(_codex_home(), "hooks.json")
+    commands = _codex_hook_commands(engrim_bin)
+    if dry_run:
+        print(f"[dry-run] Would wire Codex hooks in {hooks_path}")
+        for event, (command, _timeout) in commands.items():
+            print(f"    {event}: {command}")
+        print("[dry-run] Codex hooks must be reviewed and trusted with /hooks before they run")
+        return
+
+    os.makedirs(os.path.dirname(hooks_path), exist_ok=True)
+    hooks_data = {}
+    if os.path.exists(hooks_path):
+        try:
+            with open(hooks_path, "r", encoding="utf-8") as f:
+                hooks_data = json.load(f)
+        except json.JSONDecodeError as e:
+            sys.exit(f"Codex hooks file exists but is not valid JSON ({e}). Fix it, then re-run.")
+        except OSError as e:
+            sys.exit(f"can't read {hooks_path} ({e}). Fix the permissions, then re-run.")
+    if not isinstance(hooks_data, dict):
+        sys.exit(f"Codex hooks file must contain a JSON object: {hooks_path}")
+    hooks = hooks_data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        sys.exit(f"Codex hooks field must be a JSON object: {hooks_path}")
+
+    changed = False
+    for event, (command, timeout) in commands.items():
+        groups = hooks.setdefault(event, [])
+        if not isinstance(groups, list):
+            sys.exit(f"Codex hook event {event} must contain an array: {hooks_path}")
+        managed = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            handlers = group.get("hooks", [])
+            if not isinstance(handlers, list):
+                continue
+            for handler in handlers:
+                if isinstance(handler, dict) and _cmd_has(handler.get("command", ""), "engrim"):
+                    managed.append(handler)
+        if managed:
+            for handler in managed:
+                desired = {"type": "command", "command": command, "timeout": timeout}
+                if handler != desired:
+                    handler.clear()
+                    handler.update(desired)
+                    changed = True
+            print(f"✓ {event} Codex hook already present in {hooks_path}")
+        else:
+            groups.append({"hooks": [{"type": "command", "command": command, "timeout": timeout}]})
+            changed = True
+            print(f"✓ wired {event} Codex hook\n    {command}")
+
+    if changed:
+        tmp = hooks_path + ".engrim-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(hooks_data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, hooks_path)
+        print(f"✓ wired Codex hooks in {hooks_path}")
+    else:
+        print(f"✓ Codex hooks already current in {hooks_path}")
+    print("! review and trust these hooks in Codex with /hooks before they run")
+
+
 def _setup_claude(conn, a, engrim_bin: str, dry_run: bool = False) -> None:
     print("Wiring Claude Code environment…")
     settings_path = os.path.expanduser(getattr(a, "settings", None) or "~/.claude/settings.json")
@@ -1564,7 +1682,7 @@ def _setup_claude(conn, a, engrim_bin: str, dry_run: bool = False) -> None:
 
 
 def cmd_setup(conn, a) -> None:
-    """Universal multi-agent setup: Antigravity, Claude Code, and Cursor."""
+    """Universal multi-agent setup: Antigravity, Claude Code, Cursor, and Codex."""
     engrim_bin = _hook_bin(shutil.which("engrim") or "engrim")
     dry_run = getattr(a, "dry_run", False)
     bin_error = _verify_hook_bin(engrim_bin)
@@ -1574,7 +1692,6 @@ def cmd_setup(conn, a) -> None:
         getattr(a, "claude", False) or
         getattr(a, "cursor", False) or
         getattr(a, "codex", False) or
-        getattr(a, "codex", False) or
         getattr(a, "all", False) or
         getattr(a, "settings", None)
     )
@@ -1583,13 +1700,12 @@ def cmd_setup(conn, a) -> None:
     wire_claude = getattr(a, "claude", False) or getattr(a, "all", False) or bool(getattr(a, "settings", None))
     wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
     wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
-    wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
 
     if not explicit:
         gemini_dir = os.path.expanduser("~/.gemini")
         claude_dir = os.path.expanduser("~/.claude")
         cursor_dir = os.path.expanduser("~/.cursor")
-        codex_dir = os.path.expanduser("~/.codex")
+        codex_dir = _codex_home()
         detected = []
         if os.path.isdir(gemini_dir):
             wire_agy = True
@@ -1645,7 +1761,7 @@ def cmd_setup(conn, a) -> None:
         else:
             print("• semantic recall unavailable (model2vec didn't load) — running pure-lexical for now")
 
-    if wire_claude and bin_error and not dry_run:
+    if (wire_claude or wire_codex) and bin_error and not dry_run:
         sys.stdout.flush()
         sys.exit(f"\nNOT done — the hooks are written, but `{engrim_bin} --help` fails in a shell "
                  f"({bin_error}),\nso every one of them will silently do nothing. Fix that and "
@@ -1654,18 +1770,22 @@ def cmd_setup(conn, a) -> None:
     if wire_claude and not dry_run:
         print("\nDone. Open a NEW Claude Code session (or run /hooks to reload) and your project "
               "memory will auto-load. Try: engrim add -t fact -s \"hello world\" ; engrim context")
+    if wire_codex and not dry_run:
+        print("\nCodex hooks are installed. Open Codex and use /hooks to review and trust them; "
+              "memory will load on the next session.")
 
     print("\nUniversal memory setup complete.")
 
 
 
 def cmd_uninstall(conn, a) -> None:
-    """Universal multi-agent uninstall: Antigravity, Claude Code, and Cursor."""
+    """Universal multi-agent uninstall: Antigravity, Claude Code, Cursor, and Codex."""
     dry_run = getattr(a, "dry_run", False)
     explicit = bool(
         getattr(a, "agy", False) or
         getattr(a, "claude", False) or
         getattr(a, "cursor", False) or
+        getattr(a, "codex", False) or
         getattr(a, "all", False) or
         getattr(a, "settings", None)
     )
@@ -1673,12 +1793,13 @@ def cmd_uninstall(conn, a) -> None:
     wire_agy = getattr(a, "agy", False) or getattr(a, "all", False)
     wire_claude = getattr(a, "claude", False) or getattr(a, "all", False) or bool(getattr(a, "settings", None))
     wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
+    wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
 
     if not explicit:
         gemini_dir = os.path.expanduser("~/.gemini")
         claude_dir = os.path.expanduser("~/.claude")
         cursor_dir = os.path.expanduser("~/.cursor")
-        codex_dir = os.path.expanduser("~/.codex")
+        codex_dir = _codex_home()
         detected = []
         if os.path.isdir(gemini_dir):
             wire_agy = True
@@ -1826,6 +1947,69 @@ def _uninstall_claude(a, dry_run: bool = False) -> None:
             print(f"✓ unwired hooks and status line from {settings_path}")
         else:
             print(f"✓ hooks and status line already unwired from {settings_path}")
+
+
+def _uninstall_codex(dry_run: bool = False) -> None:
+    """Remove only the command hooks that setup owns; leave Codex config and MCP untouched."""
+    print("Unwiring Codex CLI environment…")
+    hooks_path = os.path.join(_codex_home(), "hooks.json")
+    if dry_run:
+        print(f"[dry-run] Would unwire Codex hooks in {hooks_path}")
+        return
+    if not os.path.exists(hooks_path):
+        print(f"✓ Codex hooks already unwired from {hooks_path}")
+        return
+
+    try:
+        with open(hooks_path, "r", encoding="utf-8") as f:
+            hooks_data = json.load(f)
+    except json.JSONDecodeError as e:
+        sys.exit(f"Codex hooks file exists but is not valid JSON ({e}). Fix it, then re-run.")
+    if not isinstance(hooks_data, dict):
+        sys.exit(f"Codex hooks file must contain a JSON object: {hooks_path}")
+    hooks = hooks_data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        sys.exit(f"Codex hooks field must be a JSON object: {hooks_path}")
+    changed = False
+    for event in ("SessionStart", "SessionEnd", "Stop", "UserPromptSubmit"):
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        new_groups = []
+        for group in groups:
+            if not isinstance(group, dict):
+                new_groups.append(group)
+                continue
+            handlers = group.get("hooks", [])
+            if not isinstance(handlers, list):
+                new_groups.append(group)
+                continue
+            new_handlers = [
+                handler for handler in handlers
+                if not (isinstance(handler, dict) and _cmd_has(handler.get("command", ""), "engrim"))
+            ]
+            if len(new_handlers) != len(handlers):
+                changed = True
+            if new_handlers:
+                group["hooks"] = new_handlers
+                new_groups.append(group)
+            else:
+                changed = True
+        if new_groups:
+            hooks[event] = new_groups
+        elif event in hooks:
+            del hooks[event]
+            changed = True
+
+    if changed:
+        tmp = hooks_path + ".engrim-tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(hooks_data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, hooks_path)
+        print(f"✓ unwired Codex hooks from {hooks_path}")
+    else:
+        print(f"✓ Codex hooks already unwired from {hooks_path}")
 
 
 _IMPORT_TYPE_MAP = {
@@ -2431,6 +2615,37 @@ def _ingest_transcript(conn, project, path, session=None, include_thinking=False
     return added
 
 
+def _log_codex_hook(conn, payload, explicit_project="auto"):
+    """Capture the stable prompt/assistant fields Codex exposes to command hooks.
+
+    Codex documents `transcript_path` as a convenience only and does not promise its file format.
+    Logging the event payload keeps the integration useful without coupling it to that private file.
+    """
+    event = payload.get("hook_event_name") or payload.get("event")
+    if event == "UserPromptSubmit":
+        role = "user"
+        content = payload.get("prompt") or ""
+    elif event == "Stop":
+        role = "assistant"
+        content = payload.get("last_assistant_message") or ""
+    else:
+        return
+    if not content:
+        return
+
+    project = _payload_project(payload, explicit_project)
+    session = payload.get("session_id")
+    turn = payload.get("turn_id")
+    identity = turn or hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    msg_uuid = f"codex:{session or 'session'}:{event}:{identity}"
+    conn.execute(
+        "INSERT OR IGNORE INTO log(ts,project,session,role,content,raw,msg_uuid) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (_now(), project, session, role, content, json.dumps(payload, ensure_ascii=False), msg_uuid),
+    )
+    conn.commit()
+
+
 def cmd_log(conn, a) -> None:
     """Append to the raw transcript log. `--hook` reads a Stop-hook JSON from stdin and ingests the
     session's new turns; `--from-transcript PATH` ingests a file; otherwise append one -r/-c turn."""
@@ -2438,6 +2653,9 @@ def cmd_log(conn, a) -> None:
         try:
             payload = json.load(sys.stdin)
         except Exception:
+            return
+        if getattr(a, "agent", "claude") == "codex":
+            _log_codex_hook(conn, payload, a.project)
             return
         # Resolve from the session's STABLE launch dir, not the hook process's os.getcwd(). A Stop
         # hook can be spawned with an incidental cwd (e.g. it inherits one a tool subprocess chdir'd
@@ -3013,13 +3231,13 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--json", action="store_true")
     pc.set_defaults(func=cmd_context)
 
-    ph = sub.add_parser("hook", help="Lifecycle hook JSON for Claude Code / Antigravity")
+    ph = sub.add_parser("hook", help="Lifecycle hook JSON for Claude Code / Antigravity / Codex")
     ph.add_argument("-p", "--project", default="auto")
     ph.add_argument("-b", "--budget", type=int, default=4000)
     ph.add_argument("--no-sync", action="store_true",
                     help="don't mirror Claude Code's file-memory before injecting")
-    ph.add_argument("--agent", choices=["claude", "agy", "antigravity"], default="claude",
-                    help="Target agent environment (default: claude)")
+    ph.add_argument("--agent", choices=["claude", "agy", "antigravity", "codex"], default="claude",
+                     help="Target agent environment (default: claude)")
     ph.add_argument("--event", choices=["boot", "stop", "sessionstart"], default=None,
                     help="Hook lifecycle event (default: boot or sessionstart)")
     ph.add_argument("--strict", "--gate", dest="strict", action="store_true",
@@ -3039,7 +3257,7 @@ def build_parser() -> argparse.ArgumentParser:
     prt.add_argument("--json", action="store_true")
     prt.set_defaults(func=cmd_retire)
 
-    pse = sub.add_parser("setup", help="wire engrim into agent environments (Antigravity, Claude, Cursor)")
+    pse = sub.add_parser("setup", help="wire engrim into agent environments (Antigravity, Claude, Cursor, Codex)")
     pse.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
                      help="wire Antigravity hooks, deploy skill, and register MCP server")
     pse.add_argument("--claude", dest="claude", action="store_true",
@@ -3049,7 +3267,7 @@ def build_parser() -> argparse.ArgumentParser:
     pse.add_argument("--cursor", dest="cursor", action="store_true",
                      help="add engrim MCP entry to Cursor mcp.json")
     pse.add_argument("--codex", dest="codex", action="store_true",
-                     help="wire Codex CLI hooks and MCP")
+                     help="wire Codex CLI command hooks (MCP is optional and not required)")
     pse.add_argument("--all", dest="all", action="store_true",
                      help="configure all detected agent environments")
     pse.add_argument("--dry-run", action="store_true",
@@ -3059,7 +3277,7 @@ def build_parser() -> argparse.ArgumentParser:
     pse.add_argument("--no-claude-md", action="store_true", help="don't touch ~/.claude/CLAUDE.md")
     pse.set_defaults(func=cmd_setup)
 
-    pun = sub.add_parser("uninstall", help="remove engrim from agent environments (Antigravity, Claude, Cursor)")
+    pun = sub.add_parser("uninstall", help="remove engrim from agent environments (Antigravity, Claude, Cursor, Codex)")
     pun.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
                      help="remove Antigravity hooks, skill, and MCP server")
     pun.add_argument("--claude", dest="claude", action="store_true",
@@ -3120,6 +3338,8 @@ def build_parser() -> argparse.ArgumentParser:
     plog.add_argument("--from-transcript", help="ingest new turns from a Claude Code transcript JSONL")
     plog.add_argument("--hook", action="store_true",
                       help="read a Stop-hook JSON from stdin and ingest the session's new turns")
+    plog.add_argument("--agent", choices=["claude", "codex"], default="claude",
+                      help="hook payload source (default: claude)")
     plog.add_argument("--reindex", action="store_true",
                       help="re-derive searchable text from the raw turns already stored (recovers "
                            "action lines for history logged before they existed)")
@@ -3136,7 +3356,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="char budget for the injected slice (default 600 ≈ ~150 tokens)")
     pas.set_defaults(func=cmd_assist)
 
-    psl = sub.add_parser("statusline", help="one-line ambient status for Claude Code's status bar")
+    psl = sub.add_parser("statusline", help="one-line ambient engrim status for a host status bar")
     psl.add_argument("-p", "--project", default="auto")
     psl.set_defaults(func=cmd_statusline)
 

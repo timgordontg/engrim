@@ -45,7 +45,7 @@ graph TD
         AGY["Google Antigravity<br/>(PreInvocation & Stop Hooks)"]
         CLAUDE["Claude Code<br/>(SessionStart & Stop Hooks)"]
         CURSOR["Cursor / Windsurf<br/>(Model Context Protocol stdio)"]
-        CODEX["Codex CLI<br/>(Hooks & MCP)"]
+        CODEX["Codex CLI<br/>(Native command hooks)"]
     end
 
     subgraph CoreEngine ["engrim Core Engine (v1.4.1)"]
@@ -64,7 +64,7 @@ graph TD
     AGY <-->|"hook / CLI"| ADAPTERS
     CLAUDE <-->|"hook / CLI"| ADAPTERS
     CURSOR <-->|"JSON-RPC (stdio)"| ADAPTERS
-    CODEX <-->|"hook / MCP"| ADAPTERS
+    CODEX <-->|"command hook"| ADAPTERS
     ADAPTERS --> PROVENANCE
     PROVENANCE --> ROUTER
     ROUTER --> MEMORIES
@@ -94,7 +94,7 @@ engrim setup
 - If `~/.gemini` exists $\rightarrow$ wires Antigravity lifecycle hooks, skill, and MCP server.
 - If `~/.claude` exists $\rightarrow$ wires Claude Code SessionStart, Stop, status line, and CLAUDE.md.
 - If `~/.cursor` exists $\rightarrow$ generates and merges Cursor MCP configuration.
-- If `~/.codex` exists $\rightarrow$ wires Codex CLI hooks and MCP server.
+- If `~/.codex` exists $\rightarrow$ wires Codex CLI native command hooks.
 
 ### Explicit Platform Setup
 
@@ -125,8 +125,11 @@ engrim setup --cursor
 ```bash
 engrim setup --codex
 ```
-- Wires `SessionStart`, `SessionEnd`, `Stop`, and `UserPromptSubmit` hooks in `~/.codex/hooks.json`.
-- Registers the MCP server in `~/.codex/config.toml`.
+- Wires `SessionStart`, `SessionEnd`, `Stop`, and `UserPromptSubmit` command hooks in `~/.codex/hooks.json`.
+- Calls the local `engrim` CLI directly, so MCP is not required. The hooks must be reviewed and trusted
+  with Codex's `/hooks` command before they run.
+- `engrim statusline` accepts Codex-shaped session payloads, but Codex's built-in footer only supports
+  its own status item identifiers, not arbitrary status commands.
 
 #### Windsurf
 Add `engrim` to your `~/.codeium/windsurf/mcp_config.json`:
@@ -267,4 +270,3 @@ Open to collaborations and Staff / Senior engineering opportunities in Agentic A
 ## 12. License
 
 MIT © 2026 Tim Gordon.
-
