@@ -12,14 +12,14 @@
 # with the run id folds it by hand.
 #
 # After the fold, every active `resume-pointer` in the canonical store is
-# retired (status `done`, .github/lib/engrim/store.py). A pointer describes a working tree that no longer
-# exists, and this is the only writer of the store, so a run seeded from the
-# canonical artifact can never mistake an earlier job's pointer for its own.
-# That holds on the first fold too, where the run's store becomes the
-# canonical one without a merge. engrim pins the newest pointer in the boot
-# pack and never retires one, so this is the one place that does. Re-folding
-# a store by hand keeps it: merge only carries a status onto a record that
-# is still active on this side.
+# retired (`engrim retire --all`, status `done`). A pointer describes a
+# working tree that no longer exists, and this is the only writer of the
+# store, so a run seeded from the canonical artifact can never mistake an
+# earlier job's pointer for its own. That holds on the first fold too, where
+# the run's store becomes the canonical one without a merge. engrim pins the
+# newest pointer in the boot pack and retires one only when asked, so this
+# is the one place that asks. Re-folding a store by hand keeps it: merge
+# only carries a status onto a record that is still active on this side.
 #
 # workflow_run fires only for workflow files on the default branch. Add every
 # agentic workflow that captures a store to the `workflows:` list.
@@ -59,16 +59,17 @@ jobs:
       actions: write
       contents: read
     env:
-      # The same wheel issue-triage.md stages for the MCP server. Move both together.
-      ENGRIM_VERSION: 1.3.2
-      ENGRIM_SHA256: a6c067c6014532412d91a3843074a8d6668f52b617d0f6d8566541adca122602
-      ENGRIM_WHEEL_URL: https://files.pythonhosted.org/packages/5f/77/5aea3231a32c51328bcc7efd6a7600e6ed7b299ab3abf74fe9b908c8d27b/engrim-1.3.2-py3-none-any.whl
+      # The same wheel issue-triage.md stages for the MCP server. Move both
+      # together; 1.4.0 is the floor (`retire` and `projects` arrived in it).
+      ENGRIM_VERSION: 1.4.0
+      ENGRIM_SHA256: 7ba6763c10f011f5a7218f484d9927960e8ccf161e6e1e5d0d546ab4b8310cb5
+      ENGRIM_WHEEL_URL: https://files.pythonhosted.org/packages/d1/a9/0603152eb208f685a8482638a12293aff4368dc86f0ba7df3bd95b570c60/engrim-1.4.0-py3-none-any.whl
       # The same image the agent workflow uses for the store: its sqlite has
       # FTS5, which the store's triggers need on every insert.
       IMG: python:3.13.15-alpine3.24
     steps:
-      # For .github/lib/artifact.py and .github/lib/engrim/store.py, the scripts the agent
-      # workflow uses for the same jobs.
+      # For .github/lib/artifact.py, the script the agent workflow uses for the
+      # same job.
       - uses: actions/checkout@v7
 
       - name: Stage the engrim wheel
@@ -117,9 +118,11 @@ jobs:
           else
             exit "${rc}"
           fi
-          # Retire the pointers the folded run left behind (the script goes in
-          # on stdin: nothing to mount), then drop the WAL side files.
-          docker run -i --rm -v "${root}/out:/out" "${IMG}" python - retire /out/memory.db < "${lib}/engrim/store.py"
+          # Retire the pointers the folded run left behind and log the store's
+          # size, then drop the WAL side files.
+          docker run --rm -v "${root}/site:/opt/engrim:ro" -v "${root}/out:/out" \
+            -e PYTHONPATH=/opt/engrim -e ENGRIM_EMBED=off "${IMG}" \
+            python -c "from engrim.cli import main; main(['--db', '/out/memory.db', 'retire', '--all']); main(['--db', '/out/memory.db', 'projects'])"
           rm -f "${root}/out/memory.db-wal" "${root}/out/memory.db-shm"
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "folded=${folded}" >> "$GITHUB_OUTPUT"

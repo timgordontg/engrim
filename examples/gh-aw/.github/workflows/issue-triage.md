@@ -11,9 +11,10 @@
 #     ended its turn, ends the session; gh-aw's harness restarts Claude Code,
 #     which boots from the memory pack instead of a lossy summary.
 #
-# The scripts it needs live under .github/lib/: the hook and its settings,
-# an artifact lookup, and the store operations. No gh-aw imports. Replace
-# my-app and my-bot, set the model and the key below, then `gh aw compile`.
+# The files it needs live under .github/lib/: the hook and its settings, and
+# an artifact lookup; the store operations are engrim's own commands, run
+# from the same wheel the server uses. No gh-aw imports. Replace my-app and
+# my-bot, set the model and the key below, then `gh aw compile`.
 name: "Issue triage"
 
 on:
@@ -117,14 +118,17 @@ steps:
 
   # 2. engrim itself, checksum-verified from PyPI and unpacked: a pure-Python
   #    wheel is a zip of importable packages, so its directory goes onto
-  #    PYTHONPATH — the container needs nothing else.
+  #    PYTHONPATH — the container needs nothing else, and the runner's own
+  #    python3 can run the CLI from it too. 1.4.0 is the floor: `backup`,
+  #    `retire` and `projects` below arrived in it. engrim-memory.yml pins
+  #    the same wheel; move both together.
   - name: Stage the engrim wheel for the memory MCP server
     run: |
       set -euo pipefail
-      ENGRIM_VERSION=1.3.2
-      ENGRIM_SHA256=a6c067c6014532412d91a3843074a8d6668f52b617d0f6d8566541adca122602
+      ENGRIM_VERSION=1.4.0
+      ENGRIM_SHA256=7ba6763c10f011f5a7218f484d9927960e8ccf161e6e1e5d0d546ab4b8310cb5
       wheel="engrim-${ENGRIM_VERSION}-py3-none-any.whl"
-      url="https://files.pythonhosted.org/packages/5f/77/5aea3231a32c51328bcc7efd6a7600e6ed7b299ab3abf74fe9b908c8d27b/${wheel}"
+      url="https://files.pythonhosted.org/packages/d1/a9/0603152eb208f685a8482638a12293aff4368dc86f0ba7df3bd95b570c60/${wheel}"
       dest="${RUNNER_TEMP}/gh-aw/engrim"
       rm -rf "${dest}"
       mkdir -p "${dest}/site"
@@ -158,16 +162,19 @@ steps:
       if ! python3 "${lib}/artifact.py" engrim-memory "${seed}" >/dev/null; then
         echo "the store starts empty"; exit 0
       fi
-      echo "seeding $(python3 "${lib}/engrim/store.py" count "${seed}/memory.db")"
+      echo "seeding from engrim-memory:"
+      PYTHONPATH="${RUNNER_TEMP}/gh-aw/engrim/site" ENGRIM_EMBED=off \
+        python3 -c "from engrim.cli import main; main(['--db', '${seed}/memory.db', 'projects'])"
       docker run --rm -v /tmp/gh-aw:/dtmp -v "${seed}:/seed:ro" "${IMG}" \
         sh -c 'mkdir -p /dtmp/engrim && cp /seed/memory.db /dtmp/engrim/memory.db' \
         || echo "::warning::copying the store failed; the store starts empty"
 
 # After the agent, whatever happened to it: a consistent copy of the store
-# (sqlite's online backup API, safe while the MCP server may still hold the
-# file), uploaded under this run's own name for engrim-memory.yml to fold.
-# Through a container for the reason the seed step gives: the store lives on
-# the daemon's side of /tmp.
+# (`engrim backup` — sqlite's online backup API, safe while the MCP server may
+# still hold the file), uploaded under this run's own name for
+# engrim-memory.yml to fold. Through a container for the reason the seed step
+# gives: the store lives on the daemon's side of /tmp. The few lines go in on
+# stdin: no store means no upload, never a failed step.
 post-steps:
   - name: Capture the memory store for the merge workflow
     if: always()
@@ -177,10 +184,20 @@ post-steps:
       set -uo pipefail
       out="${RUNNER_TEMP}/gh-aw/engrim/out"
       rm -rf "${out}" && mkdir -p "${out}"
-      # The script goes in on stdin: nothing to mount, wherever the daemon is.
-      docker run -i --rm -v /tmp/gh-aw/engrim:/dtmp -v "${out}:/out" "${IMG}" \
-        python - capture /dtmp/memory.db /out/memory.db < .github/lib/engrim/store.py \
+      docker run -i --rm -v /tmp/gh-aw/engrim:/dtmp -v "${out}:/out" \
+        -v "${RUNNER_TEMP}/gh-aw/engrim/site:/opt/engrim:ro" \
+        -e PYTHONPATH=/opt/engrim -e ENGRIM_EMBED=off "${IMG}" python - <<'PY' \
         || echo "::warning::capturing the memory store failed; nothing uploaded"
+      import os, sys
+      from engrim.cli import main
+      if not os.path.exists("/dtmp/memory.db"):
+          print("no store to capture"); sys.exit(0)
+      main(["--db", "/dtmp/memory.db", "backup", "/out/memory.db"])
+      # backup leaves its copy owner-only, like the store. The owner here is
+      # root, and upload-artifact runs as the runner: measured on an ARC
+      # runner, the upload failed with EACCES until the copy was readable.
+      os.chmod("/out/memory.db", 0o644)
+      PY
   - name: Upload the memory store as this run's engrim-memory-run artifact
     if: always()
     uses: actions/upload-artifact@v7
