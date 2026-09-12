@@ -3,19 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>engrim — Persistent State Engine for AI Coding Agents</title>
-  <meta name="description" content="Local-first state engine and invariant bus for autonomous coding agents. Eliminates container amnesia across ephemeral CI runners.">
-
-  <!-- Open Graph -->
-  <meta property="og:title" content="engrim — Persistent State Engine for AI Coding Agents">
-  <meta property="og:description" content="Eliminating container amnesia across ephemeral CI runners and developer sessions.">
-  <meta property="og:url" content="https://engrim.dev/">
-  <meta property="og:type" content="website">
+  <title>engrim — Cross-Session Memory for AI Coding Agents</title>
+  <meta name="description" content="Cross-session memory and context continuity for AI coding agents. Local-first, zero-dependency CLI.">
 
   <!-- Inter & JetBrains Mono -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -26,15 +20,6 @@
           fontFamily: {
             sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
             mono: ['JetBrains Mono', 'monospace'],
-          },
-          colors: {
-            surface: {
-              DEFAULT: '#090a0f',
-              card: '#0f1117',
-              border: '#1e222d',
-              borderMuted: '#161922',
-              hover: '#141720',
-            }
           }
         }
       }
@@ -42,7 +27,7 @@
   </script>
   <style>
     body {
-      background-color: #090a0f;
+      background-color: #0b0c10;
       color: #94a3b8;
       font-family: 'Inter', sans-serif;
       -webkit-font-smoothing: antialiased;
@@ -53,228 +38,129 @@
     }
   </style>
 </head>
-<body class="min-h-screen flex flex-col">
+<body class="min-h-screen flex flex-col justify-between">
 
-  <!-- Top Bar / Nav -->
-  <header class="border-b border-surface-border sticky top-0 bg-[#090a0f]/90 backdrop-blur-md z-50">
-    <div class="max-w-4xl mx-auto px-6 h-14 flex items-center justify-between">
+  <!-- Header -->
+  <header class="border-b border-zinc-800/80 bg-[#0b0c10]/95 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-3xl mx-auto px-6 h-14 flex items-center justify-between">
       <div class="flex items-center space-x-3">
-        <a href="/" class="font-mono font-semibold text-zinc-100 tracking-tight text-sm flex items-center space-x-2">
-          <span>engrim</span>
-          <span class="text-zinc-500 font-normal">/</span>
-          <span class="text-zinc-400 font-normal">dev</span>
+        <a href="/" class="font-mono font-medium text-zinc-100 text-sm tracking-tight">
+          engrim<span class="text-zinc-500">.dev</span>
         </a>
         <span class="text-[11px] font-mono px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-400 border border-zinc-800">
           v1.4.2
         </span>
       </div>
 
-      <nav class="flex items-center space-x-6 text-xs font-mono">
-        <a href="#problem" class="text-zinc-400 hover:text-zinc-200 transition-colors">problem</a>
-        <a href="#architecture" class="text-zinc-400 hover:text-zinc-200 transition-colors">architecture</a>
-        <a href="#enterprise" class="text-zinc-400 hover:text-zinc-200 transition-colors">enterprise</a>
-        <a href="https://github.com/timgordontg/engrim" target="_blank" rel="noopener noreferrer" class="text-zinc-300 hover:text-white transition-colors flex items-center space-x-1">
-          <span>github</span>
-          <span class="text-zinc-500">↗</span>
-        </a>
+      <nav class="flex items-center space-x-5 text-xs font-mono">
+        <a href="https://github.com/timgordontg/engrim" target="_blank" rel="noopener noreferrer" class="text-zinc-400 hover:text-zinc-200 transition-colors">github ↗</a>
+        <a href="https://pypi.org/project/engrim/" target="_blank" rel="noopener noreferrer" class="text-zinc-400 hover:text-zinc-200 transition-colors">pypi ↗</a>
       </nav>
     </div>
   </header>
 
-  <!-- Content Container -->
-  <main class="max-w-4xl mx-auto px-6 flex-grow py-16">
+  <!-- Main Content -->
+  <main class="max-w-3xl mx-auto px-6 py-16 flex-grow space-y-16">
     
-    <!-- Hero / Spec Header -->
-    <section class="pb-16 border-b border-surface-borderMuted">
-      <div class="space-y-4">
-        <p class="font-mono text-xs text-zinc-500 uppercase tracking-wider">Systems Infrastructure · State &amp; Memory Substrate</p>
-        <h1 class="text-2xl sm:text-3xl font-semibold text-zinc-100 tracking-tight leading-snug">
-          Persistent state engine for autonomous coding agent fleets.
-        </h1>
-        <p class="text-sm sm:text-base text-zinc-400 max-w-2xl leading-relaxed">
-          Ephemeral CI runners and container evictions discard agent memory on shutdown. Engrim provides local-first, project-scoped state continuity and invariant enforcement across runner lifecycles and model boundaries.
-        </p>
-      </div>
+    <!-- Hero Header -->
+    <section class="space-y-4">
+      <h1 class="text-2xl sm:text-3xl font-medium text-zinc-100 tracking-tight">
+        Cross-session memory and context continuity for AI coding agents.
+      </h1>
+      <p class="text-sm sm:text-base text-zinc-400 leading-relaxed max-w-2xl">
+        Engrim is a local-first, zero-dependency engine that persists architectural decisions, measured outcomes, and project state across session clears. Clear context freely without losing the rationale behind past work.
+      </p>
 
-      <!-- Install & Quick Run -->
-      <div class="mt-8 flex flex-col sm:flex-row items-start sm:items-center gap-3">
-        <div class="flex items-center bg-surface-card border border-surface-border rounded px-3.5 py-2 font-mono text-xs text-zinc-300 w-full sm:w-auto justify-between">
+      <!-- Quick Install -->
+      <div class="pt-4 flex flex-col sm:flex-row items-start sm:items-center gap-3">
+        <div class="flex items-center bg-zinc-900/90 border border-zinc-800 rounded px-3.5 py-2 font-mono text-xs text-zinc-200 w-full sm:w-auto justify-between">
           <span><span class="text-zinc-500 select-none">$ </span>pip install engrim && engrim setup</span>
-          <button onclick="copyCode(this)" class="ml-4 text-zinc-500 hover:text-zinc-300 transition-colors" title="Copy">
+          <button onclick="copyCode(this)" class="ml-4 text-zinc-500 hover:text-zinc-300 transition-colors">
             copy
           </button>
         </div>
-        <div class="text-xs font-mono text-zinc-500">
-          Zero external SaaS telemetry · Pure SQLite local-first
-        </div>
+        <span class="text-xs font-mono text-zinc-500">Local SQLite · Zero telemetry</span>
       </div>
     </section>
 
-    <!-- Problem & Context -->
-    <section id="problem" class="py-14 border-b border-surface-borderMuted space-y-6">
-      <h2 class="font-mono text-xs uppercase tracking-wider text-zinc-400 font-medium">The Structural Problem: Container Amnesia</h2>
+    <!-- Terminal Example -->
+    <section class="space-y-3">
+      <div class="flex items-center justify-between text-xs font-mono text-zinc-500">
+        <span>Session Boot Trace</span>
+        <span>~4k char memory pack</span>
+      </div>
+
+      <div class="rounded border border-zinc-800 bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-300 overflow-x-auto">
+        <div class="text-zinc-500 select-none"># Agent starts a new session after context clear (/clear)</div>
+        <div><span class="text-zinc-500 select-none">$ </span>engrim context</div>
+        <div class="text-zinc-400 pt-1">🧠 engrim · memory restored for this project · /workspace/my-project</div>
+        <div class="text-zinc-500 pl-3 border-l border-zinc-800 my-2 space-y-1">
+          <div><span class="text-zinc-400">[DECISION #42]</span> Chose SQLite WAL mode over external database daemon</div>
+          <div><span class="text-zinc-400">[FEEDBACK #45]</span> PreCompact hook captures state at decision time, not session end</div>
+          <div><span class="text-zinc-400">[POINTER #50]</span> Active task: Add benchmark regression tests for hybrid search</div>
+        </div>
+        <div class="text-zinc-500 select-none"># Context loaded in &lt; 5ms · Leaves 98% of context window free for reasoning</div>
+      </div>
+    </section>
+
+    <!-- Core Workflow -->
+    <section class="space-y-4">
+      <h2 class="text-xs font-mono uppercase tracking-wider text-zinc-400 font-medium">Core Workflow</h2>
       
-      <p class="text-sm text-zinc-400 leading-relaxed">
-        Modern cloud CI/CD (GitHub Actions, Kubernetes ARC runners, ephemeral pods) was engineered for stateless, deterministic bash scripts. When autonomous agents (Claude Code, Antigravity, GitHub Agentic Workflows) execute multi-turn triage, automated SRE, or iterative refactors in CI:
-      </p>
-
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
-        <div class="p-4 rounded border border-surface-border bg-surface-card space-y-2">
-          <div class="font-mono text-xs font-medium text-zinc-200">01 / Pod Teardown Amnesia</div>
-          <p class="text-xs text-zinc-400 leading-relaxed">
-            Every runner shutdown wipes local files. Next runner spins up blind, forcing agents to re-explore the codebase and repeat identical failed hypotheses.
-          </p>
+      <div class="space-y-3 font-mono text-xs">
+        <div class="p-3.5 rounded border border-zinc-800/80 bg-zinc-900/40 space-y-1">
+          <div class="text-zinc-200 font-medium">1. Capture decisions as you work</div>
+          <div class="text-zinc-400">engrim add -t decision -s "Chose Postgres over Mongo" --tags db</div>
         </div>
 
-        <div class="p-4 rounded border border-surface-border bg-surface-card space-y-2">
-          <div class="font-mono text-xs font-medium text-zinc-200">02 / Compaction Collapse</div>
-          <p class="text-xs text-zinc-400 leading-relaxed">
-            Raw build traces exhaust 128k/200k token windows in minutes. Native LLM context compaction drops subtle architectural invariants, introducing silent regressions.
-          </p>
+        <div class="p-3.5 rounded border border-zinc-800/80 bg-zinc-900/40 space-y-1">
+          <div class="text-zinc-200 font-medium">2. Query project memory on demand</div>
+          <div class="text-zinc-400">engrim recall -q "database architecture" --tag db</div>
         </div>
 
-        <div class="p-4 rounded border border-surface-border bg-surface-card space-y-2">
-          <div class="font-mono text-xs font-medium text-zinc-200">03 / Cross-Model Blindness</div>
-          <p class="text-xs text-zinc-400 leading-relaxed">
-            Heterogeneous model ensembles (e.g. o3 for planning, Claude for implementation, Antigravity for QA) lack a shared, persistent state bus between steps.
-          </p>
+        <div class="p-3.5 rounded border border-zinc-800/80 bg-zinc-900/40 space-y-1">
+          <div class="text-zinc-200 font-medium">3. Hydrate session boot pack</div>
+          <div class="text-zinc-400">engrim context --budget 4000</div>
+        </div>
+
+        <div class="p-3.5 rounded border border-zinc-800/80 bg-zinc-900/40 space-y-1">
+          <div class="text-zinc-200 font-medium">4. Pre-clear integrity gate</div>
+          <div class="text-zinc-400">engrim review --strict</div>
         </div>
       </div>
     </section>
 
-    <!-- Terminal Trace / Mechanism -->
-    <section class="py-14 border-b border-surface-borderMuted space-y-6">
-      <div class="flex items-center justify-between">
-        <h2 class="font-mono text-xs uppercase tracking-wider text-zinc-400 font-medium">Execution Trace: Ephemeral Runner Recovery</h2>
-        <span class="font-mono text-[11px] text-zinc-500">sub-5ms hydration</span>
-      </div>
+    <!-- Key Principles -->
+    <section class="space-y-4">
+      <h2 class="text-xs font-mono uppercase tracking-wider text-zinc-400 font-medium">Design Invariants</h2>
 
-      <div class="rounded border border-surface-border bg-[#06070a] p-4 font-mono text-xs leading-relaxed overflow-x-auto text-zinc-300">
-        <div class="text-zinc-600"># Ephemeral K8s runner booted after previous runner timed out on test suite</div>
-        <div class="text-zinc-400"><span class="text-zinc-500">$</span> engrim context --budget 4000</div>
-        <div class="text-emerald-400/90 pt-1">engrim · memory restored for project: /workspace/engine</div>
-        <div class="text-zinc-500 pl-2">24 active records loaded (~3,820 chars) · 0 context lost · rest available via `recall`</div>
-        
-        <div class="pt-3 space-y-1 text-zinc-400 pl-2 border-l border-zinc-800 my-2">
-          <div><span class="text-zinc-500">[DECISION #999]</span> Invariant Bus: Heterogeneous model handoff contract locked</div>
-          <div><span class="text-zinc-500">[FEEDBACK #1000]</span> Runner Invariant: ping must return exit code 0 with JSON status</div>
-          <div><span class="text-zinc-500">[FACT #1008]</span> Network topology: In-VPC gRPC listener on unix domain socket</div>
-        </div>
-
-        <div class="text-zinc-600 pt-2"># Agent runs with 98% of context window preserved for active reasoning</div>
-        <div class="text-zinc-400"><span class="text-zinc-500">$</span> pytest tests/test_runner.py</div>
-        <div class="text-zinc-500">234 passed in 3.42s</div>
-      </div>
-    </section>
-
-    <!-- Technical Architecture -->
-    <section id="architecture" class="py-14 border-b border-surface-borderMuted space-y-6">
-      <h2 class="font-mono text-xs uppercase tracking-wider text-zinc-400 font-medium">Core Engine Architecture</h2>
-      
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div class="p-4 rounded border border-surface-border bg-surface-card space-y-2">
-          <div class="font-mono text-xs text-zinc-200 font-medium">Sub-4k Precision Boot Packs</div>
-          <p class="text-xs text-zinc-400 leading-relaxed">
-            Deterministic curation budget. Loads high-signal decisions, measured outcomes, and active invariants in under 4,000 characters—leaving context windows clear.
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        <div class="p-3.5 rounded border border-zinc-800/80 bg-zinc-900/40 space-y-1.5">
+          <div class="text-zinc-200 font-medium">Local-First Storage</div>
+          <p class="text-zinc-400 leading-relaxed">
+            All records persist in a local SQLite database at <code class="text-zinc-300 font-mono">~/.engrim/memory.db</code>. No servers, no accounts, no cloud dependencies.
           </p>
         </div>
 
-        <div class="p-4 rounded border border-surface-border bg-surface-card space-y-2">
-          <div class="font-mono text-xs text-zinc-200 font-medium">Hybrid Search Retrieval</div>
-          <p class="text-xs text-zinc-400 leading-relaxed">
-            Fast reciprocal rank fusion combining BM25 keyword matching with dense local vector embeddings. Sub-5ms retrieval over thousands of historical decisions.
+        <div class="p-3.5 rounded border border-zinc-800/80 bg-zinc-900/40 space-y-1.5">
+          <div class="text-zinc-200 font-medium">Sub-4k Char Budget</div>
+          <p class="text-zinc-400 leading-relaxed">
+            Curates high-signal memories into a compact boot pack under 4,000 characters so your LLM context window remains focused on code.
           </p>
         </div>
 
-        <div class="p-4 rounded border border-surface-border bg-surface-card space-y-2">
-          <div class="font-mono text-xs text-zinc-200 font-medium">PreCompact Invariant Capture</div>
-          <p class="text-xs text-zinc-400 leading-relaxed">
-            Intercepts model sessions at the moment architectural choices and test feedback occur. Prevents degradation during automatic context window compaction.
+        <div class="p-3.5 rounded border border-zinc-800/80 bg-zinc-900/40 space-y-1.5">
+          <div class="text-zinc-200 font-medium">Universal Agent Hooks</div>
+          <p class="text-zinc-400 leading-relaxed">
+            Native integrations for Antigravity, Claude Code, Cursor, and OpenAI Codex via standard lifecycle hooks and MCP.
           </p>
         </div>
 
-        <div class="p-4 rounded border border-surface-border bg-surface-card space-y-2">
-          <div class="font-mono text-xs text-zinc-200 font-medium">Native Lifecycle Hooks</div>
-          <p class="text-xs text-zinc-400 leading-relaxed">
-            Standard JSON hooks for Antigravity, Claude Code, Cursor, OpenAI Codex, and standalone CI runner environments. Zero custom plugins required.
+        <div class="p-3.5 rounded border border-zinc-800/80 bg-zinc-900/40 space-y-1.5">
+          <div class="text-zinc-200 font-medium">Hybrid Search Retrieval</div>
+          <p class="text-zinc-400 leading-relaxed">
+            Combines BM25 keyword matching with dense vector embeddings using Reciprocal Rank Fusion for fast recall across project history.
           </p>
-        </div>
-      </div>
-    </section>
-
-    <!-- Enterprise In-VPC -->
-    <section id="enterprise" class="py-14 border-b border-surface-borderMuted space-y-6">
-      <div class="flex items-center justify-between">
-        <h2 class="font-mono text-xs uppercase tracking-wider text-zinc-400 font-medium">Commercial Distribution</h2>
-        <span class="font-mono text-[11px] text-zinc-500">Open-Core / In-VPC</span>
-      </div>
-
-      <div class="border border-surface-border rounded bg-surface-card overflow-hidden">
-        <table class="w-full text-left text-xs font-mono">
-          <thead class="bg-zinc-900/60 border-b border-surface-border text-zinc-400">
-            <tr>
-              <th class="p-3 font-medium">Capability</th>
-              <th class="p-3 font-medium">Open-Source Engine</th>
-              <th class="p-3 font-medium text-zinc-200">Enterprise In-VPC Collector</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-surface-borderMuted text-zinc-400">
-            <tr>
-              <td class="p-3 text-zinc-300">Deployment</td>
-              <td class="p-3">Local CLI / Developer Seat</td>
-              <td class="p-3 text-zinc-200">Air-Gapped Private Helm / Daemon</td>
-            </tr>
-            <tr>
-              <td class="p-3 text-zinc-300">Scope</td>
-              <td class="p-3">Single Repository / Worktree</td>
-              <td class="p-3 text-zinc-200">Multi-Repo Graph (500+ Microservices)</td>
-            </tr>
-            <tr>
-              <td class="p-3 text-zinc-300">Concurrency</td>
-              <td class="p-3">Single Process SQLite WAL</td>
-              <td class="p-3 text-zinc-200">High-Throughput Streaming gRPC</td>
-            </tr>
-            <tr>
-              <td class="p-3 text-zinc-300">Security &amp; Compliance</td>
-              <td class="p-3">Local Filesystem Permissions</td>
-              <td class="p-3 text-zinc-200">In-Flight Secret Scrubbing &amp; SOC2 Audit</td>
-            </tr>
-            <tr>
-              <td class="p-3 text-zinc-300">Observability</td>
-              <td class="p-3">Terminal CLI Inspector</td>
-              <td class="p-3 text-zinc-200">Executive Bottleneck &amp; Token Waste Cockpit</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="pt-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs">
-        <span class="text-zinc-400">For enterprise air-gapped pilot deployments and technical diligence briefs:</span>
-        <a href="mailto:tim@engrim.dev?subject=Engrim%20Enterprise%20In-VPC%20Diligence" class="font-mono text-zinc-200 hover:text-white underline underline-offset-4 decoration-zinc-700">
-          tim@engrim.dev →
-        </a>
-      </div>
-    </section>
-
-    <!-- Verification / Test Rigor -->
-    <section class="py-14 space-y-6">
-      <h2 class="font-mono text-xs uppercase tracking-wider text-zinc-400 font-medium">Verification Rigor</h2>
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 font-mono text-center">
-        <div class="p-3 rounded border border-surface-border bg-surface-card">
-          <div class="text-lg font-semibold text-zinc-100">234/234</div>
-          <div class="text-[11px] text-zinc-500 mt-1">Tests Green</div>
-        </div>
-        <div class="p-3 rounded border border-surface-border bg-surface-card">
-          <div class="text-lg font-semibold text-zinc-100">&lt; 5ms</div>
-          <div class="text-[11px] text-zinc-500 mt-1">Hydration Latency</div>
-        </div>
-        <div class="p-3 rounded border border-surface-border bg-surface-card">
-          <div class="text-lg font-semibold text-zinc-100">100%</div>
-          <div class="text-[11px] text-zinc-500 mt-1">Local / Air-Gapped</div>
-        </div>
-        <div class="p-3 rounded border border-surface-border bg-surface-card">
-          <div class="text-lg font-semibold text-zinc-100">0</div>
-          <div class="text-[11px] text-zinc-500 mt-1">Telemetry SaaS</div>
         </div>
       </div>
     </section>
@@ -282,17 +168,17 @@
   </main>
 
   <!-- Footer -->
-  <footer class="border-t border-surface-border py-8 text-xs font-mono text-zinc-500">
-    <div class="max-w-4xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+  <footer class="border-t border-zinc-800/80 py-8 text-xs font-mono text-zinc-500">
+    <div class="max-w-3xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
       <div>
         <span>engrim.dev</span>
         <span class="mx-2">·</span>
-        <span>© 2026 Tim Gordon</span>
+        <span>Open source</span>
       </div>
-      <div class="flex items-center space-x-6">
-        <a href="https://github.com/timgordontg/engrim" target="_blank" rel="noopener noreferrer" class="hover:text-zinc-300 transition-colors">github</a>
-        <a href="https://pypi.org/project/engrim/" target="_blank" rel="noopener noreferrer" class="hover:text-zinc-300 transition-colors">pypi</a>
-        <a href="mailto:tim@engrim.dev" class="hover:text-zinc-300 transition-colors">tim@engrim.dev</a>
+      <div class="flex items-center space-x-5">
+        <a href="https://github.com/timgordontg/engrim" target="_blank" rel="noopener noreferrer" class="hover:text-zinc-300 transition-colors">GitHub</a>
+        <a href="https://pypi.org/project/engrim/" target="_blank" rel="noopener noreferrer" class="hover:text-zinc-300 transition-colors">PyPI</a>
+        <a href="mailto:tim@engrim.dev" class="hover:text-zinc-300 transition-colors">Contact</a>
       </div>
     </div>
   </footer>
