@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en" class="dark scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Engrim | Persistent State Substrate for Autonomous Software Engineering</title>
+  <meta name="description" content="Engrim eliminates Container Amnesia for autonomous coding agents in CI/CD. Persistent memory, invariant enforcement, and cross-model state across ephemeral runner restarts.">
+  
+  <!-- Open Graph / Twitter -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://engrim.dev/">
+  <meta property="og:title" content="Engrim | Persistent State for Autonomous Coding Fleets">
+  <meta property="og:description" content="Persistent memory and invariant state engine for autonomous coding agents across ephemeral runner restarts and container evictions.">
+  
+  <!-- Tailwind CSS CDN & Fonts -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              400: '#34d399',
+              500: '#10b981',
+              600: '#059669',
+              900: '#064e3b',
+            },
+            dark: {
+              950: '#06080c',
+              900: '#0c1017',
+              850: '#121824',
+              800: '#1b2434',
+              700: '#28364d'
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    body {
+      background-color: #06080c;
+      color: #e2e8f0;
+      font-family: 'Inter', sans-serif;
+    }
+    .glow-emerald {
+      box-shadow: 0 0 50px -10px rgba(16, 185, 129, 0.25);
+    }
+    .grid-pattern {
+      background-size: 32px 32px;
+      background-image: 
+        linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    }
+    .terminal-scrollbar::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    .terminal-scrollbar::-webkit-scrollbar-thumb {
+      background: #28364d;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col selection:bg-emerald-500 selection:text-black">
+
+  <!-- Background Grids & Ambient Glow -->
+  <div class="fixed inset-0 grid-pattern pointer-events-none opacity-60"></div>
+  <div class="fixed -top-40 left-1/2 -translate-x-1/2 w-[700px] h-[350px] bg-emerald-500/15 blur-[120px] rounded-full pointer-events-none"></div>
+
+  <!-- Navigation -->
+  <header class="relative z-50 border-b border-white/5 bg-dark-950/80 backdrop-blur-md sticky top-0">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <span class="text-2xl">🧠</span>
+        <span class="font-extrabold text-lg tracking-tight text-white">engrim<span class="text-emerald-400">.dev</span></span>
+        <span class="hidden sm:inline-flex items-center px-2 py-0.5 rounded text-xs font-mono bg-emerald-950/80 text-emerald-400 border border-emerald-800/60">
+          v1.4.2
+        </span>
+      </div>
+
+      <nav class="hidden md:flex items-center space-x-8 text-sm font-medium text-slate-300">
+        <a href="#problem" class="hover:text-emerald-400 transition-colors">The Problem</a>
+        <a href="#how-it-works" class="hover:text-emerald-400 transition-colors">How It Works</a>
+        <a href="#enterprise" class="hover:text-emerald-400 transition-colors">Enterprise In-VPC</a>
+        <a href="#architecture" class="hover:text-emerald-400 transition-colors">Architecture</a>
+      </nav>
+
+      <div class="flex items-center space-x-3">
+        <a href="https://github.com/timgordontg/engrim" target="_blank" rel="noopener noreferrer" class="flex items-center space-x-2 px-3 py-1.5 rounded-lg border border-slate-700 bg-dark-850 hover:bg-dark-800 text-slate-200 text-sm font-medium transition-all">
+          <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          <span class="hidden sm:inline">GitHub</span>
+          <span class="px-1.5 py-0.2 bg-slate-800 rounded text-xs text-slate-400 font-mono">223★</span>
+        </a>
+        <a href="#quickstart" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-dark-950 font-semibold text-sm transition-all shadow-sm">
+          Get Started
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <main class="flex-grow">
+    <section class="relative pt-20 pb-20 px-6 max-w-5xl mx-auto text-center">
+      <div class="inline-flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium bg-emerald-950/60 border border-emerald-800/60 text-emerald-300 mb-8">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span>v1.4.2 Production Shipped</span>
+        <span class="text-emerald-600">·</span>
+        <span>234 Passing Tests</span>
+        <span class="text-emerald-600">·</span>
+        <span>Kubernetes ARC Validated</span>
+      </div>
+
+      <h1 class="text-4xl sm:text-6xl font-extrabold tracking-tight text-white max-w-4xl mx-auto leading-[1.12]">
+        The Missing State Substrate for <br class="hidden sm:inline">
+        <span class="bg-clip-text text-transparent bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-400">
+          Autonomous Coding Fleets
+        </span>
+      </h1>
+
+      <p class="mt-6 text-lg sm:text-xl text-slate-400 max-w-2xl mx-auto font-normal leading-relaxed">
+        Modern cloud runners are strictly stateless. When agents face container restarts and context window exhaustion, they suffer from 
+        <strong class="text-slate-200 font-semibold">Container Amnesia</strong>. Engrim gives agent loops persistent memory, invariant contracts, and closed-loop learning across runner lifecycles.
+      </p>
+
+      <!-- CTA & Install Command -->
+      <div class="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4">
+        <div class="flex items-center bg-dark-900 border border-slate-700/80 rounded-xl px-4 py-2.5 shadow-xl w-full sm:w-auto">
+          <span class="text-slate-500 font-mono text-sm mr-2.5">$</span>
+          <code id="install-cmd" class="font-mono text-sm text-emerald-400 font-medium">pip install engrim</code>
+          <button onclick="copyCommand()" class="ml-4 p-1.5 hover:bg-dark-800 rounded-md text-slate-400 hover:text-slate-200 transition-colors" title="Copy command">
+            <svg id="copy-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+            <svg id="check-icon" class="w-4 h-4 text-emerald-400 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+          </button>
+        </div>
+
+        <a href="#enterprise" class="w-full sm:w-auto px-6 py-2.5 rounded-xl border border-slate-700 bg-dark-850 hover:bg-dark-800 text-slate-200 font-medium text-sm transition-all flex items-center justify-center space-x-2">
+          <span>Enterprise In-VPC Overview</span>
+          <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+        </a>
+      </div>
+
+      <!-- Live Terminal Showcase -->
+      <div class="mt-16 text-left max-w-4xl mx-auto rounded-2xl border border-slate-800 bg-dark-900 shadow-2xl overflow-hidden glow-emerald">
+        <!-- Terminal Header -->
+        <div class="flex items-center justify-between px-4 py-3 bg-dark-950 border-b border-slate-800/80">
+          <div class="flex items-center space-x-2">
+            <div class="w-3 h-3 rounded-full bg-red-500/80"></div>
+            <div class="w-3 h-3 rounded-full bg-yellow-500/80"></div>
+            <div class="w-3 h-3 rounded-full bg-green-500/80"></div>
+            <span class="ml-2 text-xs font-mono text-slate-500">arc-runner-k8s-pod-7b9f · bash</span>
+          </div>
+          <div class="flex items-center space-x-2">
+            <span class="px-2 py-0.5 rounded text-[11px] font-mono bg-dark-850 text-slate-400 border border-slate-800">
+              Ephemeral Runner Recovery
+            </span>
+          </div>
+        </div>
+
+        <!-- Terminal Body -->
+        <div class="p-6 font-mono text-xs sm:text-sm leading-relaxed overflow-x-auto terminal-scrollbar space-y-3 bg-dark-950/90 text-slate-300">
+          <div class="text-slate-500"># Ephemeral Kubernetes runner recycled after test timeout. Pod restarted fresh.</div>
+          
+          <div class="flex items-center space-x-2">
+            <span class="text-emerald-400 font-bold">runner@ci-node:~$</span>
+            <span class="text-white">engrim context</span>
+          </div>
+
+          <div class="text-emerald-400 font-medium">
+            🧠 engrim · memory restored for this project — you don't have to re-explain · /workspace/billing-api
+          </div>
+          <div class="text-slate-400 pl-4 border-l-2 border-emerald-500/40">
+            27 of 112 curated records loaded (~3,940 chars) · 0 context lost · remaining one `recall` away
+          </div>
+
+          <div class="pt-2 text-slate-400">
+            <span class="text-amber-400 font-semibold">[INVARIANT #1000]</span> CLI Invariant: engrim ping must return zero exit code and JSON status<br>
+            <span class="text-cyan-400 font-semibold">[FEEDBACK #1004]</span> Enterprise validation: Engrim solves container amnesia on on-prem K8s agent fleets<br>
+            <span class="text-purple-400 font-semibold">[DECISION #999]</span> Multi-Model Git Factory: Engrim as Invariant Bus Across Model Ensembles
+          </div>
+
+          <div class="pt-3 flex items-center space-x-2">
+            <span class="text-emerald-400 font-bold">runner@ci-node:~$</span>
+            <span class="text-white">engrim add -t decision -s "Verified SQLite WAL mode concurrency on ARC multi-tenant pod" --tags k8s,wal</span>
+          </div>
+          <div class="text-emerald-400">
+            + #1010 [decision] /workspace/billing-api (captured mid-session, zero amnesia)
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- The Problem Section -->
+    <section id="problem" class="py-20 border-t border-white/5 bg-dark-950">
+      <div class="max-w-5xl mx-auto px-6">
+        <div class="text-center max-w-2xl mx-auto mb-16">
+          <h2 class="text-xs font-mono uppercase tracking-widest text-emerald-400 font-semibold mb-2">The Bottleneck</h2>
+          <h3 class="text-3xl font-extrabold text-white">Why Autonomous Agent Fleets Fail in CI</h3>
+          <p class="mt-4 text-slate-400 text-sm sm:text-base">
+            Developer infrastructure was architected 15 years ago for deterministic, stateless scripts. Autonomous cognitive loops break in ephemeral cloud runners.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+          <div class="p-6 rounded-2xl border border-slate-800/80 bg-dark-900/60 flex flex-col justify-between">
+            <div>
+              <div class="w-10 h-10 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400 text-lg mb-4">
+                ⚠️
+              </div>
+              <h4 class="text-lg font-bold text-white mb-2">Container Amnesia</h4>
+              <p class="text-sm text-slate-400 leading-relaxed">
+                When GitHub Actions or K8s pods cycle, the agent starts from zero. It re-reads hundreds of files and repeatedly attempts the exact same failed hypotheses.
+              </p>
+            </div>
+            <div class="mt-6 pt-4 border-t border-slate-800/80 text-xs font-mono text-red-400">
+              Result: Infinite retry loops &amp; thrashed CI
+            </div>
+          </div>
+
+          <div class="p-6 rounded-2xl border border-slate-800/80 bg-dark-900/60 flex flex-col justify-between">
+            <div>
+              <div class="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 text-lg mb-4">
+                💥
+              </div>
+              <h4 class="text-lg font-bold text-white mb-2">Compaction Collapse</h4>
+              <p class="text-sm text-slate-400 leading-relaxed">
+                Raw CI traces blow out 128k/200k context windows in minutes. Naive LLM summarizers wipe subtle architectural boundaries and test invariants.
+              </p>
+            </div>
+            <div class="mt-6 pt-4 border-t border-slate-800/80 text-xs font-mono text-amber-400">
+              Result: Subtle regressions merged to main
+            </div>
+          </div>
+
+          <div class="p-6 rounded-2xl border border-slate-800/80 bg-dark-900/60 flex flex-col justify-between">
+            <div>
+              <div class="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 text-lg mb-4">
+                🧩
+              </div>
+              <h4 class="text-lg font-bold text-white mb-2">Multi-Model Blindness</h4>
+              <p class="text-sm text-slate-400 leading-relaxed">
+                Modern factories use model ensembles (o3-mini for planning, Claude 3.7 for coding, Antigravity for QA). Without a shared invariant bus, state is lost between hops.
+              </p>
+            </div>
+            <div class="mt-6 pt-4 border-t border-slate-800/80 text-xs font-mono text-purple-400">
+              Result: Zero cross-model coherence
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- How It Works / Pillars -->
+    <section id="how-it-works" class="py-20 border-t border-white/5 bg-dark-900/40">
+      <div class="max-w-5xl mx-auto px-6">
+        <div class="text-center max-w-2xl mx-auto mb-16">
+          <h2 class="text-xs font-mono uppercase tracking-widest text-emerald-400 font-semibold mb-2">Engine Architecture</h2>
+          <h3 class="text-3xl font-extrabold text-white">Engineered for Unforgiving Systems</h3>
+          <p class="mt-4 text-slate-400 text-sm sm:text-base">
+            High-speed local-first execution with zero cloud SaaS telemetry. Built to integrate natively into agent lifecycle hooks.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div class="p-8 rounded-2xl border border-slate-800 bg-dark-950/70">
+            <div class="flex items-center space-x-3 mb-4">
+              <span class="text-2xl">⚡</span>
+              <h4 class="text-xl font-bold text-white">Sub-4k Precision Boot Packs</h4>
+            </div>
+            <p class="text-slate-400 text-sm leading-relaxed mb-4">
+              Engrim synthesizes curated project memories into high-density, sub-4k character boot packs. This leaves <strong class="text-emerald-400 font-semibold">98% of your LLM context window</strong> completely untouched for active code reasoning, avoiding expensive context thrashing.
+            </p>
+            <div class="font-mono text-xs bg-dark-900 p-3 rounded-lg border border-slate-800 text-slate-300">
+              <span class="text-emerald-400">Budget:</span> 4,000 chars · <span class="text-emerald-400">Latency:</span> 4.2ms · <span class="text-emerald-400">Algorithm:</span> BM25 + Dense Semantic
+            </div>
+          </div>
+
+          <div class="p-8 rounded-2xl border border-slate-800 bg-dark-950/70">
+            <div class="flex items-center space-x-3 mb-4">
+              <span class="text-2xl">🛡️</span>
+              <h4 class="text-xl font-bold text-white">PreCompact Invariant Capture</h4>
+            </div>
+            <p class="text-slate-400 text-sm leading-relaxed mb-4">
+              Decisions are captured <strong class="text-white font-medium">at the moment they occur</strong> via terminal and agent hooks—not post-mortem. When long sessions trigger native LLM compaction, Engrim pins active invariants to eliminate memory decay.
+            </p>
+            <div class="font-mono text-xs bg-dark-900 p-3 rounded-lg border border-slate-800 text-slate-300">
+              <span class="text-emerald-400">Hooks:</span> Claude Code, Antigravity, Cursor, OpenAI Codex, CI Runners
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Enterprise In-VPC Section -->
+    <section id="enterprise" class="py-20 border-t border-white/5 bg-dark-950">
+      <div class="max-w-5xl mx-auto px-6">
+        <div class="p-10 rounded-3xl border border-emerald-500/30 bg-gradient-to-b from-dark-900 via-dark-950 to-dark-950 relative overflow-hidden">
+          <div class="max-w-3xl">
+            <span class="px-3 py-1 rounded-full text-xs font-mono font-semibold bg-emerald-950 border border-emerald-800 text-emerald-300">
+              COMMERCIAL ENTERPRISE SUBSTRATE
+            </span>
+            <h3 class="text-3xl sm:text-4xl font-extrabold text-white mt-4">
+              Engrim In-VPC Enterprise Collector
+            </h3>
+            <p class="mt-4 text-slate-300 text-base leading-relaxed">
+              For organizations running fleets of autonomous agents across hundreds of repositories. Air-gapped, zero external data leakage, and deep executive observability.
+            </p>
+
+            <div class="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+              <div class="flex items-start space-x-3">
+                <span class="text-emerald-400 font-bold">✓</span>
+                <span class="text-slate-300"><strong class="text-white">Multi-Repo Graph:</strong> Unifies state across 500+ microservices in an enterprise VPC.</span>
+              </div>
+              <div class="flex items-start space-x-3">
+                <span class="text-emerald-400 font-bold">✓</span>
+                <span class="text-slate-300"><strong class="text-white">In-Flight Secret Scrubbing:</strong> Automatic PII, token, and credential redaction before embedding.</span>
+              </div>
+              <div class="flex items-start space-x-3">
+                <span class="text-emerald-400 font-bold">✓</span>
+                <span class="text-slate-300"><strong class="text-white">Streaming gRPC Daemon:</strong> Sub-millisecond sync for 100+ concurrent CI runners.</span>
+              </div>
+              <div class="flex items-start space-x-3">
+                <span class="text-emerald-400 font-bold">✓</span>
+                <span class="text-slate-300"><strong class="text-white">Executive Cockpit:</strong> Track bot token waste, recurring architectural failure loops, and velocity.</span>
+              </div>
+            </div>
+
+            <div class="mt-10 pt-8 border-t border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div>
+                <span class="text-xs font-mono text-slate-400 block">Deploy via Private Helm Chart / On-Prem</span>
+                <span class="text-sm font-medium text-white">SOC2 Compliance Ready · Air-Gapped Kubernetes Fleet</span>
+              </div>
+              <a href="mailto:tim@engrim.dev?subject=Engrim%20Enterprise%20In-VPC%20Inquiry" class="px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-dark-950 font-bold text-sm transition-all shadow-lg text-center w-full sm:w-auto">
+                Request Enterprise Architecture Brief
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Traction / Validation -->
+    <section class="py-20 border-t border-white/5 bg-dark-900/30">
+      <div class="max-w-4xl mx-auto px-6 text-center">
+        <div class="inline-block p-8 rounded-2xl border border-slate-800 bg-dark-950/90 text-left">
+          <div class="flex items-center space-x-4 mb-4">
+            <div class="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center font-bold text-slate-300 border border-slate-700">
+              MP
+            </div>
+            <div>
+              <div class="font-bold text-white text-base">Mike Pastore (@mwpastore)</div>
+              <div class="text-xs text-emerald-400 font-mono">10-yr Discover Financial Veteran · Former Chief Architect · Sinatra Core</div>
+            </div>
+          </div>
+          <p class="text-slate-300 text-sm sm:text-base italic leading-relaxed">
+            "We validated Engrim on production Kubernetes Action Runner Controller (ARC) fleets. Ephemeral runner restarts used to completely blind autonomous agent runs. With Engrim's state bus, agents resume exactly where the previous runner left off, with zero regression on architectural invariants."
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Quickstart / Footer CTA -->
+    <section id="quickstart" class="py-20 border-t border-white/5 bg-dark-950 text-center">
+      <div class="max-w-4xl mx-auto px-6">
+        <h3 class="text-3xl font-extrabold text-white">Start Building Without Amnesia</h3>
+        <p class="mt-4 text-slate-400 text-base max-w-xl mx-auto">
+          Install the zero-dependency CLI engine or integrate into your autonomous GitHub Actions pipelines in under 60 seconds.
+        </p>
+
+        <div class="mt-8 max-w-lg mx-auto bg-dark-900 p-4 rounded-2xl border border-slate-800 flex items-center justify-between">
+          <code class="font-mono text-sm text-emerald-400">pip install engrim && engrim setup</code>
+          <a href="https://pypi.org/project/engrim/" target="_blank" rel="noopener noreferrer" class="px-4 py-1.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-slate-300 text-xs font-semibold transition-colors">
+            PyPI ↗
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-white/5 bg-dark-950 py-10">
+    <div class="max-w-6xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-4">
+      <div class="flex items-center space-x-2">
+        <span>🧠 engrim.dev</span>
+        <span>·</span>
+        <span>© 2026 Tim Gordon. All rights reserved.</span>
+      </div>
+      <div class="flex items-center space-x-6">
+        <a href="https://github.com/timgordontg/engrim" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">GitHub</a>
+        <a href="https://pypi.org/project/engrim/" target="_blank" rel="noopener noreferrer" class="hover:text-slate-300 transition-colors">PyPI</a>
+        <a href="mailto:tim@engrim.dev" class="hover:text-emerald-400 transition-colors">tim@engrim.dev</a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    function copyCommand() {
+      const cmd = document.getElementById('install-cmd').innerText;
+      navigator.clipboard.writeText(cmd).then(() => {
+        document.getElementById('copy-icon').classList.add('hidden');
+        document.getElementById('check-icon').classList.remove('hidden');
+        setTimeout(() => {
+          document.getElementById('copy-icon').classList.remove('hidden');
+          document.getElementById('check-icon').classList.add('hidden');
+        }, 2000);
+      });
+    }
+  </script>
+</body>
+</html>
