@@ -36,6 +36,18 @@ def test_initialize_and_tools_list(tmp_path):
     assert {t["name"] for t in TOOLS} == names
 
 
+def test_tools_list_output_schemas():
+    # Every tool must advertise an outputSchema so clients can validate
+    # structured results without guessing shapes.
+    for tool in TOOLS:
+        schema = tool.get("outputSchema")
+        assert isinstance(schema, dict), f"Tool {tool['name']} is missing outputSchema"
+        assert schema.get("type") in ("object", "array", "string"), \
+            f"Tool {tool['name']} has unexpected outputSchema type"
+        assert isinstance(schema.get("description"), str), \
+            f"Tool {tool['name']} outputSchema is missing a description"
+
+
 def test_add_then_recall_and_context(tmp_path):
     db = str(tmp_path / "m.db")
     conn = connect(db)

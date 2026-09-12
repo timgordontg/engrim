@@ -55,6 +55,16 @@ TOOLS = [
             },
             "required": ["query"],
         },
+        "outputSchema": {
+            "type": "object",
+            "description": "Ranked memory records matching the query.",
+            "properties": {
+                "project": {"type": "string"},
+                "count": {"type": "integer"},
+                "records": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["project", "count", "records"],
+        },
     },
     {
         "name": "engrim_context",
@@ -72,6 +82,18 @@ TOOLS = [
                            "description": "Maximum character budget for the returned memory pack (default 4000). Prioritizes active decisions and constraints."},
             },
             "required": [],
+        },
+        "outputSchema": {
+            "type": "object",
+            "description": "Curated session-boot pack within the character budget.",
+            "properties": {
+                "project": {"type": "string"},
+                "loaded": {"type": "integer"},
+                "total_active": {"type": "integer"},
+                "chars": {"type": "integer"},
+                "records": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["project", "loaded", "total_active", "chars", "records"],
         },
     },
     {
@@ -100,6 +122,18 @@ TOOLS = [
             },
             "required": ["type", "summary"],
         },
+        "outputSchema": {
+            "type": "object",
+            "description": "Confirmation identifying the stored record.",
+            "properties": {
+                "id": {"type": "integer"},
+                "type": {"type": "string"},
+                "project": {"type": "string"},
+                "summary": {"type": "string"},
+                "origin_agent": {"type": "string"},
+            },
+            "required": ["id", "type", "project", "summary", "origin_agent"],
+        },
     },
     {
         "name": "engrim_review",
@@ -113,6 +147,21 @@ TOOLS = [
                             "description": "Project identifier tag; 'auto' infers from current working directory repository root."},
             },
             "required": [],
+        },
+        "outputSchema": {
+            "type": "object",
+            "description": "Coverage verdict plus uncaptured decision candidates (safe_to_clear is null when no transcript log exists).",
+            "properties": {
+                "project": {"type": "string"},
+                "total_log_turns": {"type": "integer"},
+                "scanned_turns": {"type": "integer"},
+                "active_curated": {"type": "integer"},
+                "safe_to_clear": {"type": ["boolean", "null"]},
+                "uncaptured_count": {"type": "integer"},
+                "uncaptured": {"type": "array", "items": {"type": "object"}},
+                "message": {"type": "string"},
+            },
+            "required": ["project", "total_log_turns", "scanned_turns", "active_curated", "safe_to_clear", "uncaptured_count", "uncaptured", "message"],
         },
     },
 ]
