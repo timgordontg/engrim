@@ -9,7 +9,8 @@ import sys
 import pytest
 
 from engrim.cli import connect, main, add_memory
-from engrim.adapters import opencode as oc
+from engrim.hosts.opencode import hooks as oc
+from engrim.hosts.opencode import wiring as host
 
 
 @pytest.fixture
@@ -124,7 +125,7 @@ def test_hook_cli_dispatch(tmp_path, monkeypatch, capsys):
 # ------------------------------------------------------------------ plugin + setup
 
 def test_render_plugin_bakes_quoted_binary():
-    src = oc.render_plugin('"C:\\Users\\tim\\Scripts\\engrim.EXE"')
+    src = host.render_plugin('"C:\\Users\\tim\\Scripts\\engrim.EXE"')
     assert 'const ENGRIM = "C:/Users/tim/Scripts/engrim.EXE"' in src
     assert "__ENGRIM_BIN__" not in src
     for hook in ("experimental.chat.system.transform", "chat.message",
@@ -252,14 +253,14 @@ def test_stop_hook_exits_nonzero_when_ingest_fails(tmp_path, capsys):
 
 
 def test_plugin_source_has_review_fixes():
-    src = oc.render_plugin("/usr/local/bin/engrim")
+    src = host.render_plugin("/usr/local/bin/engrim")
     assert "info.summary" in src                 # compaction summaries are never logged as turns
     assert "if (r.ok)" in src                    # ids commit only after a successful ingest
     assert "cmd|bat" in src and "ComSpec" in src  # Windows .cmd/.bat shims go through cmd.exe
     assert "PROMPT_TIMEOUT_MS" in src            # per-message minder has a short leash
     assert "MINDER_WAIT_MS" in src               # ...and the model call doesn't block on it
     assert "ENGRIM_BOOT_BUDGET" in src and "budget: BOOT_BUDGET" in src   # README's budget knob is real
-    assert oc.OPENCODE_AGENTS_BLOCK.splitlines()[0] in src   # one usage text, baked from the AGENTS block
+    assert host.AGENTS_MD.splitlines()[0] in src   # one usage text, baked from the AGENTS block
 
 
 def test_boot_and_prompt_fail_quietly_on_unreadable_db(tmp_path, capsys):
@@ -333,7 +334,7 @@ def test_plugin_flush_skips_summary_and_retries_failed_ingest(tmp_path):
     fake = tmp_path / "fake-engrim.sh"
     fake.write_text(_FAKE_ENGRIM, encoding="utf-8")
     fake.chmod(0o755)
-    (tmp_path / "engrim.mjs").write_text(oc.render_plugin(str(fake)), encoding="utf-8")
+    (tmp_path / "engrim.mjs").write_text(host.render_plugin(str(fake)), encoding="utf-8")
     (tmp_path / "harness.mjs").write_text(_HARNESS, encoding="utf-8")
     r = subprocess.run(["node", "harness.mjs"], cwd=tmp_path, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr

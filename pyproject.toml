@@ -36,3 +36,6 @@ version = { attr = "engrim.__version__" }   # single source of truth: src/engrim
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"engrim.hosts.opencode" = ["plugin.js", "AGENTS.md"]
