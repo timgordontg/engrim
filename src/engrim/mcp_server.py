@@ -282,6 +282,8 @@ def serve(conn, inp=None, out=None) -> None:
                 detected_client = "claude-code"
             elif "cursor" in cname:
                 detected_client = "cursor"
+            elif "opencode" in cname:
+                detected_client = "opencode"
 
             client_ver = (msg.get("params") or {}).get("protocolVersion") or DEFAULT_PROTOCOL_VERSION
             _ok(rid, {

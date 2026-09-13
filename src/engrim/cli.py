@@ -45,7 +45,7 @@ except ImportError:
 DEFAULT_DB = os.path.expanduser("~/.engrim/memory.db")
 TYPES = ("decision", "fact", "feedback", "state", "reference", "user")
 STATUSES = ("active", "superseded", "done")
-ORIGIN_AGENTS = ("antigravity", "claude-code", "cursor", "cli", "user")
+ORIGIN_AGENTS = ("antigravity", "claude-code", "cursor", "opencode", "cli", "user")
 # priority for the session-boot pack: how-to-work-with-user first, then state, then the rest
 _PRIO = {"user": 0, "feedback": 1, "state": 2, "decision": 3, "fact": 4, "reference": 5}
 
@@ -60,6 +60,8 @@ def _norm_agent(agent: str | None) -> str | None:
         return "claude-code"
     if a == "cursor":
         return "cursor"
+    if a in ("opencode", "open-code", "open_code"):
+        return "opencode"
     if a == "cli":
         return "cli"
     if a == "user":
@@ -74,6 +76,7 @@ def _agent_display(agent: str | None) -> str:
         "antigravity": "Antigravity",
         "claude-code": "Claude Code",
         "cursor": "Cursor",
+        "opencode": "OpenCode",
         "cli": "CLI",
         "user": "User",
     }
@@ -692,24 +695,29 @@ def cmd_assist(conn, a) -> None:
         payload = json.load(sys.stdin) or {}
     except Exception:
         return emit("")
-    prompt = payload.get("prompt") or ""
-    terms = _content_terms(prompt)
-    if len(terms) < 2:               # too little signal to be worth any tokens
-        return emit("")
     # Same stable resolution as the status line + log hook, so the minder writes its "in play" marker
     # under the project the bar actually reads — they never disagree about which project this session is.
     project = _payload_project(payload, a.project)
+    emit(_assist_block(conn, project, payload.get("prompt") or "", a.k, a.budget))
+
+
+def _assist_block(conn, project, prompt, k=5, budget=600) -> str:
+    """The minder's text for one prompt — shared by the Claude Code hook (wrapped in hook JSON) and
+    the OpenCode adapter (plain text). Empty string when nothing is worth the tokens."""
+    terms = _content_terms(prompt)
+    if len(terms) < 2:               # too little signal to be worth any tokens
+        return ""
     try:
-        rows = _minder_rows(conn, project, " ".join(terms), prompt, a.k)
+        rows = _minder_rows(conn, project, " ".join(terms), prompt, k)
     except Exception:
-        return emit("")
+        return ""
     out, used = [], 0
     for r in rows:
         line = f"- [{r['type']}] {r['summary']}"
         detail = (r["detail"] or "").strip().replace("\n", " ")
-        if detail and used + len(line) + 2 < a.budget:        # a short detail snippet for context
+        if detail and used + len(line) + 2 < budget:        # a short detail snippet for context
             line += ": " + detail[:160]
-        if used + len(line) > a.budget:
+        if used + len(line) > budget:
             break
         out.append(line)
         used += len(line) + 1
@@ -729,7 +737,7 @@ def cmd_assist(conn, a) -> None:
     except Exception:
         directive = ""
     if not out and not directive:
-        return emit("")                                       # nothing relevant -> spend nothing
+        return ""                                             # nothing relevant -> spend nothing
     if out:
         try:  # record the pull so the ambient status line can show "N in play" — out-of-band, never in chat
             _meta_set(conn, project, "minder_n", str(len(out)))
@@ -738,7 +746,7 @@ def cmd_assist(conn, a) -> None:
             pass
     head = ("Possibly-relevant project memory (engrim), pulled for this message — use if helpful:\n"
             + "\n".join(out)) if out else ""
-    emit((head + directive).strip())
+    return (head + directive).strip()
 
 
 def cmd_statusline(conn, a) -> None:
@@ -1121,6 +1129,14 @@ def cmd_hook(conn, a) -> None:
             handle_stop(db_path=getattr(a, "db", None), strict=_is_strict(a))
         else:
             sys.exit(f"Unknown event {event} for agent {agent}")
+        return
+    if agent == "opencode":
+        from engrim.adapters.opencode import handle_boot, handle_prompt, handle_stop
+        event = getattr(a, "event", None) or "boot"
+        fn = {"boot": handle_boot, "prompt": handle_prompt, "stop": handle_stop}.get(event)
+        if fn is None:
+            sys.exit(f"Unknown event {event} for agent {agent}")
+        fn(db_path=getattr(a, "db", None))
         return
 
     if agent == "codex":
@@ -1600,6 +1616,140 @@ def _setup_codex(engrim_bin: str, dry_run: bool = False) -> None:
     print("! review and trust these hooks in Codex with /hooks before they run")
 
 
+def _opencode_config_dir(pretty: bool = False) -> str:
+    """OpenCode's global config dir: $XDG_CONFIG_HOME/opencode, i.e. ~/.config/opencode by default."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return os.path.join(xdg, "opencode")
+    return "~/.config/opencode" if pretty else os.path.expanduser("~/.config/opencode")
+
+
+def _opencode_config_file(cfg_dir: str) -> str:
+    """The config file to merge the MCP entry into. `opencode.json` first; `opencode.jsonc` only if it
+    is a strict-JSON file we can round-trip (comments would be lost on rewrite, so we refuse those)."""
+    plain = os.path.join(cfg_dir, "opencode.json")
+    jsonc = os.path.join(cfg_dir, "opencode.jsonc")
+    if os.path.exists(plain) or not os.path.exists(jsonc):
+        return plain
+    try:
+        with open(jsonc, encoding="utf-8") as f:
+            json.load(f)
+        return jsonc
+    except Exception:
+        return plain
+
+
+def _setup_opencode(engrim_bin: str, dry_run: bool = False) -> None:
+    from engrim.adapters.opencode import OPENCODE_AGENTS_BLOCK, render_plugin
+    print("Wiring OpenCode environment…")
+    cfg_dir = _opencode_config_dir()
+    plugin_path = os.path.join(cfg_dir, "plugins", "engrim.js")
+    cfg_path = _opencode_config_file(cfg_dir)
+    agents_md = os.path.join(cfg_dir, "AGENTS.md")
+    raw_bin = engrim_bin.strip('"')
+    mcp_entry = {"type": "local", "command": [raw_bin, "serve", "--mcp"], "enabled": True}
+    if dry_run:
+        print(f"[dry-run] Would write OpenCode plugin to {plugin_path}")
+        print(f"[dry-run] Would register engrim MCP server in {cfg_path}")
+        print(f"[dry-run] Would add usage note to {agents_md}")
+        return
+
+    # Validate the config first so a bad file can't leave a half-wired setup (plugin written, MCP not).
+    cfg = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except json.JSONDecodeError as e:
+            sys.exit(f"{cfg_path} exists but is not valid JSON ({e}). Fix it, then re-run.")
+    if not isinstance(cfg, dict):
+        sys.exit(f"{cfg_path} is not a JSON object. Fix it, then re-run.")
+    if "mcp" in cfg and not isinstance(cfg["mcp"], dict):
+        sys.exit(f"{cfg_path}: the \"mcp\" key must be a JSON object. Fix it, then re-run.")
+
+    os.makedirs(os.path.dirname(plugin_path), exist_ok=True)
+    tmp = plugin_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(render_plugin(engrim_bin))
+    os.replace(tmp, plugin_path)
+    print(f"✓ wrote OpenCode plugin {plugin_path}")
+
+    servers = cfg.setdefault("mcp", {})
+    if servers.get("engrim") == mcp_entry:
+        print(f"✓ MCP server already registered in {cfg_path}")
+    else:
+        servers["engrim"] = mcp_entry
+        cfg.setdefault("$schema", "https://opencode.ai/config.json")
+        tmp = cfg_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, cfg_path)
+        print(f"✓ registered MCP server in {cfg_path}")
+    jsonc = os.path.join(cfg_dir, "opencode.jsonc")
+    if cfg_path.endswith(".json") and os.path.exists(jsonc):
+        print(f"• {jsonc} also exists — OpenCode reads both; the MCP entry went into opencode.json")
+
+    existing = ""
+    if os.path.exists(agents_md):
+        with open(agents_md, encoding="utf-8", errors="replace") as f:
+            existing = f.read()
+    if "engrim" in existing and "Project memory" in existing:
+        print(f"✓ AGENTS.md already mentions engrim ({agents_md})")
+    else:
+        with open(agents_md, "a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write("\n" + OPENCODE_AGENTS_BLOCK)
+        print(f"✓ added usage note to {agents_md}")
+    print("  Restart OpenCode to load the plugin and MCP server.")
+
+
+def _uninstall_opencode(dry_run: bool = False) -> None:
+    from engrim.adapters.opencode import OPENCODE_AGENTS_BLOCK
+    print("Unwiring OpenCode environment…")
+    cfg_dir = _opencode_config_dir()
+    plugin_path = os.path.join(cfg_dir, "plugins", "engrim.js")
+    agents_md = os.path.join(cfg_dir, "AGENTS.md")
+    if dry_run:
+        print(f"[dry-run] Would remove {plugin_path}, the engrim MCP entry, and the AGENTS.md note")
+        return
+    if os.path.exists(plugin_path):
+        os.remove(plugin_path)
+        print(f"✓ removed {plugin_path}")
+    else:
+        print(f"✓ plugin already removed ({plugin_path})")
+    for name in ("opencode.json", "opencode.jsonc"):
+        cfg_path = os.path.join(cfg_dir, name)
+        if not os.path.exists(cfg_path):
+            continue
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            print(f"• {cfg_path} isn't strict JSON — remove the mcp.engrim entry by hand if present")
+            continue
+        servers = cfg.get("mcp") if isinstance(cfg, dict) else None
+        if isinstance(servers, dict) and "engrim" in servers:
+            del servers["engrim"]
+            if not servers:
+                del cfg["mcp"]
+            tmp = cfg_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+                f.write("\n")
+            os.replace(tmp, cfg_path)
+            print(f"✓ removed MCP entry from {cfg_path}")
+    if os.path.exists(agents_md):
+        with open(agents_md, encoding="utf-8", errors="replace") as f:
+            existing = f.read()
+        if OPENCODE_AGENTS_BLOCK in existing:
+            new = existing.replace("\n" + OPENCODE_AGENTS_BLOCK, "").replace(OPENCODE_AGENTS_BLOCK, "")
+            with open(agents_md, "w", encoding="utf-8") as f:
+                f.write(new)
+            print(f"✓ removed usage note from {agents_md}")
+
+
 def _setup_claude(conn, a, engrim_bin: str, dry_run: bool = False) -> None:
     print("Wiring Claude Code environment…")
     settings_path = os.path.expanduser(getattr(a, "settings", None) or "~/.claude/settings.json")
@@ -1692,6 +1842,7 @@ def cmd_setup(conn, a) -> None:
         getattr(a, "claude", False) or
         getattr(a, "cursor", False) or
         getattr(a, "codex", False) or
+        getattr(a, "opencode", False) or
         getattr(a, "all", False) or
         getattr(a, "settings", None)
     )
@@ -1700,6 +1851,7 @@ def cmd_setup(conn, a) -> None:
     wire_claude = getattr(a, "claude", False) or getattr(a, "all", False) or bool(getattr(a, "settings", None))
     wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
     wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
+    wire_opencode = getattr(a, "opencode", False) or getattr(a, "all", False)
 
     if not explicit:
         gemini_dir = os.path.expanduser("~/.gemini")
@@ -1719,12 +1871,16 @@ def cmd_setup(conn, a) -> None:
         if os.path.isdir(codex_dir):
             wire_codex = True
             detected.append("Codex CLI (~/.codex)")
+        if os.path.isdir(_opencode_config_dir()):
+            wire_opencode = True
+            detected.append(f"OpenCode ({_opencode_config_dir(pretty=True)})")
 
         if detected:
             print(f"Auto-detected environments: {', '.join(detected)}")
         else:
-            print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor, ~/.codex).")
-            print("Defaulting to Claude Code setup. (Use --agy, --cursor, --codex, or --all to wire others).")
+            print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor, ~/.codex, "
+                  "~/.config/opencode).")
+            print("Defaulting to Claude Code setup. (Use --agy, --cursor, --codex, --opencode, or --all to wire others).")
             wire_claude = True
 
     if wire_agy:
@@ -1733,6 +1889,8 @@ def cmd_setup(conn, a) -> None:
         _setup_claude(conn, a, engrim_bin, dry_run=dry_run)
     if wire_cursor:
         _setup_cursor(engrim_bin, dry_run=dry_run)
+    if wire_opencode:
+        _setup_opencode(engrim_bin, dry_run=dry_run)
     if wire_codex:
         _setup_codex(engrim_bin, dry_run=dry_run)
 
@@ -1786,6 +1944,7 @@ def cmd_uninstall(conn, a) -> None:
         getattr(a, "claude", False) or
         getattr(a, "cursor", False) or
         getattr(a, "codex", False) or
+        getattr(a, "opencode", False) or
         getattr(a, "all", False) or
         getattr(a, "settings", None)
     )
@@ -1794,6 +1953,7 @@ def cmd_uninstall(conn, a) -> None:
     wire_claude = getattr(a, "claude", False) or getattr(a, "all", False) or bool(getattr(a, "settings", None))
     wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
     wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
+    wire_opencode = getattr(a, "opencode", False) or getattr(a, "all", False)
 
     if not explicit:
         gemini_dir = os.path.expanduser("~/.gemini")
@@ -1813,12 +1973,16 @@ def cmd_uninstall(conn, a) -> None:
         if os.path.isdir(codex_dir):
             wire_codex = True
             detected.append("Codex CLI (~/.codex)")
+        if os.path.isdir(_opencode_config_dir()):
+            wire_opencode = True
+            detected.append(f"OpenCode ({_opencode_config_dir(pretty=True)})")
 
         if detected:
             print(f"Auto-detected environments: {', '.join(detected)}")
         else:
-            print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor, ~/.codex).")
-            print("Defaulting to Claude Code uninstall. (Use --agy, --cursor, --codex, or --all to specify others).")
+            print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor, ~/.codex, "
+                  "~/.config/opencode).")
+            print("Defaulting to Claude Code uninstall. (Use --agy, --cursor, --codex, --opencode, or --all to specify others).")
             wire_claude = True
 
     if wire_agy:
@@ -1827,6 +1991,8 @@ def cmd_uninstall(conn, a) -> None:
         _uninstall_claude(a, dry_run=dry_run)
     if wire_cursor:
         _uninstall_cursor(dry_run=dry_run)
+    if wire_opencode:
+        _uninstall_opencode(dry_run=dry_run)
     if wire_codex:
         _uninstall_codex(dry_run=dry_run)
         
@@ -3236,10 +3402,11 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("-b", "--budget", type=int, default=4000)
     ph.add_argument("--no-sync", action="store_true",
                     help="don't mirror Claude Code's file-memory before injecting")
-    ph.add_argument("--agent", choices=["claude", "agy", "antigravity", "codex"], default="claude",
+    ph.add_argument("--agent", choices=["claude", "agy", "antigravity", "codex", "opencode"], default="claude",
                      help="Target agent environment (default: claude)")
-    ph.add_argument("--event", choices=["boot", "stop", "sessionstart"], default=None,
-                    help="Hook lifecycle event (default: boot or sessionstart)")
+    ph.add_argument("--event", choices=["boot", "stop", "sessionstart", "prompt"], default=None,
+                    help="Hook lifecycle event (default: boot or sessionstart; "
+                         "opencode: boot | prompt | stop)")
     ph.add_argument("--strict", "--gate", dest="strict", action="store_true",
                     help="gate mode: exit with code 2 if uncaptured decisions detected on stop")
     ph.set_defaults(func=cmd_hook)
@@ -3257,7 +3424,7 @@ def build_parser() -> argparse.ArgumentParser:
     prt.add_argument("--json", action="store_true")
     prt.set_defaults(func=cmd_retire)
 
-    pse = sub.add_parser("setup", help="wire engrim into agent environments (Antigravity, Claude, Cursor, Codex)")
+    pse = sub.add_parser("setup", help="wire engrim into agent environments (Antigravity, Claude, Cursor, Codex, OpenCode)")
     pse.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
                      help="wire Antigravity hooks, deploy skill, and register MCP server")
     pse.add_argument("--claude", dest="claude", action="store_true",
@@ -3268,6 +3435,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="add engrim MCP entry to Cursor mcp.json")
     pse.add_argument("--codex", dest="codex", action="store_true",
                      help="wire Codex CLI command hooks (MCP is optional and not required)")
+    pse.add_argument("--opencode", dest="opencode", action="store_true",
+                     help="write the OpenCode plugin, register the MCP server, and add AGENTS.md notes")
     pse.add_argument("--all", dest="all", action="store_true",
                      help="configure all detected agent environments")
     pse.add_argument("--dry-run", action="store_true",
@@ -3277,7 +3446,7 @@ def build_parser() -> argparse.ArgumentParser:
     pse.add_argument("--no-claude-md", action="store_true", help="don't touch ~/.claude/CLAUDE.md")
     pse.set_defaults(func=cmd_setup)
 
-    pun = sub.add_parser("uninstall", help="remove engrim from agent environments (Antigravity, Claude, Cursor, Codex)")
+    pun = sub.add_parser("uninstall", help="remove engrim from agent environments (Antigravity, Claude, Cursor, Codex, OpenCode)")
     pun.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
                      help="remove Antigravity hooks, skill, and MCP server")
     pun.add_argument("--claude", dest="claude", action="store_true",
@@ -3286,6 +3455,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="remove engrim MCP entry from Cursor mcp.json")
     pun.add_argument("--codex", dest="codex", action="store_true",
                      help="remove Codex CLI hooks and MCP")
+    pun.add_argument("--opencode", dest="opencode", action="store_true",
+                     help="remove the OpenCode plugin, MCP entry, and AGENTS.md notes")
     pun.add_argument("--all", dest="all", action="store_true",
                      help="remove from all detected agent environments")
     pun.add_argument("--dry-run", action="store_true",

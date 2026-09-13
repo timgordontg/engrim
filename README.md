@@ -9,7 +9,7 @@
 
 **The Universal Cross-Model & Cross-Agent Episodic Memory Store.**
 
-A local-first, project-scoped SQLite memory engine that allows developers to freely switch between models and environments (**Google Antigravity**, **Claude Code**, **Cursor MCP**, **Windsurf**) on the **SAME** project without losing architectural decisions, user constraints, or project state.
+A local-first, project-scoped SQLite memory engine that allows developers to freely switch between models and environments (**Google Antigravity**, **Claude Code**, **Cursor MCP**, **Windsurf**, **OpenCode**) on the **SAME** project without losing architectural decisions, user constraints, or project state.
 
 ---
 
@@ -21,7 +21,7 @@ As context windows scale to 1M+ tokens, developers face **attention dilution**: 
 
 `engrim` replaces attention dilution with **4,000 characters of curated episodic working memory**:
 - **Switzerland of AI Memory**: Decouples project intelligence from any single AI vendor or proprietary cloud silo. Switch from Gemini 3.8 in Antigravity to Claude 3.7 Sonnet in Claude Code to Codex CLI mid-project — your agents pick up right where the others left off.
-- **Save Button for Autonomous Coding**: Externalize decisions, constraints, and state as you work. The connected AI agents (Antigravity, Claude Code, Cursor, Codex, Codex CLI) can automatically write to memory via MCP tools when they make architectural decisions, or you can manually save them (`engrim add`). Clear your agent session freely (`/clear`) and watch context reload intact.
+- **Save Button for Autonomous Coding**: Externalize decisions, constraints, and state as you work. The connected AI agents (Antigravity, Claude Code, Cursor, Codex CLI, OpenCode) can automatically write to memory via MCP tools when they make architectural decisions, or you can manually save them (`engrim add`). Clear your agent session freely (`/clear`) and watch context reload intact.
 - **Smart, Hot Context Loading**: Combines SQLite FTS5 (bm25 keyword search) with static vector embeddings (`model2vec`) in a zero-latency hybrid reciprocal-rank fusion engine.
 
 ---
@@ -46,10 +46,11 @@ graph TD
         CLAUDE["Claude Code<br/>(SessionStart & Stop Hooks)"]
         CURSOR["Cursor / Windsurf<br/>(Model Context Protocol stdio)"]
         CODEX["Codex CLI<br/>(Native command hooks)"]
+        OPENCODE["OpenCode<br/>(Plugin & MCP)"]
     end
 
     subgraph CoreEngine ["engrim Core Engine (v1.4.2)"]
-        ADAPTERS["Adapters & Hooks<br/>(agy, claude, mcp)"]
+        ADAPTERS["Adapters & Hooks<br/>(agy, claude, opencode, mcp)"]
         PROVENANCE["Agent Provenance Engine<br/>(origin_agent tracking)"]
         ROUTER["Hybrid Retrieval & Minder<br/>(bm25 lexical + vector cosine)"]
     end
@@ -65,6 +66,7 @@ graph TD
     CLAUDE <-->|"hook / CLI"| ADAPTERS
     CURSOR <-->|"JSON-RPC (stdio)"| ADAPTERS
     CODEX <-->|"command hook"| ADAPTERS
+    OPENCODE <-->|"plugin / MCP"| ADAPTERS
     ADAPTERS --> PROVENANCE
     PROVENANCE --> ROUTER
     ROUTER --> MEMORIES
@@ -95,6 +97,7 @@ engrim setup
 - If `~/.claude` exists $\rightarrow$ wires Claude Code SessionStart, Stop, status line, and CLAUDE.md.
 - If `~/.cursor` exists $\rightarrow$ generates and merges Cursor MCP configuration.
 - If `~/.codex` exists $\rightarrow$ wires Codex CLI native command hooks.
+- If `~/.config/opencode` exists $\rightarrow$ writes the OpenCode plugin, registers the MCP server, and adds `AGENTS.md` notes.
 
 ### Explicit Platform Setup
 
@@ -131,6 +134,37 @@ engrim setup --codex
 - `engrim statusline` accepts Codex-shaped session payloads, but Codex's built-in footer only supports
   its own status item identifiers, not arbitrary status commands.
 
+#### OpenCode
+```bash
+engrim setup --opencode
+```
+OpenCode has no shell hooks, so engrim ships as a plugin plus an MCP server:
+- Writes `~/.config/opencode/plugins/engrim.js` (respects `$XDG_CONFIG_HOME`). The plugin calls `engrim hook --agent opencode` at each lifecycle moment:
+  - **session boot** → the memory pack is injected into the system prompt (once per session, and again after compaction);
+  - **every prompt** → the minder pulls the few records relevant to that message;
+  - **session idle** → the session's new user/assistant turns land in the flight-recorder log (idempotent, keyed on OpenCode's message ids);
+  - **compaction** → the compaction prompt is told that durable memory lives in engrim and to list any uncaptured decisions so they get `engrim_add`-ed.
+- Registers `mcp.engrim` (`engrim serve --mcp`) in `~/.config/opencode/opencode.json`, exposing the `engrim_*` tools to the agent. Existing keys are preserved; a commented `opencode.jsonc` is never rewritten.
+- Appends a short usage note to `~/.config/opencode/AGENTS.md`.
+
+Cost note: the boot pack (≤4,000 chars by default) and the usage note ride in the system prompt of every model call in the session, including title and subagent calls — that is how OpenCode's `system.transform` works. Set `ENGRIM_BOOT_BUDGET` (chars, default 4000) in OpenCode's environment to shrink the pack, or curate harder, if that overhead matters to you.
+
+This makes engrim the durable memory layer for OpenCode: its own SQLite session store and compaction summaries stay as the transcript, while decisions, constraints, and state live in `~/.engrim/memory.db` where every other agent on the repo can read them. Restart OpenCode after setup; `engrim uninstall --opencode` reverses all three steps.
+
+##### "OpenCode already has a SQLite database — why add engrim?"
+
+It does, and it is good at what it is for. `opencode.db` holds sessions, messages, and parts: it is the **transcript** store for one tool. It has no memory table, no cross-session retrieval the model can call, and nothing outside OpenCode can read it. engrim solves a different problem, and the plugin makes the two complementary rather than competing:
+
+- **Switch harnesses on the same task.** Start in OpenCode, finish in Claude Code, Codex CLI, Cursor, or Antigravity (or the other way round). Every one of them boots from the same `~/.engrim/memory.db`, so the decisions you made in one show up in the next. OpenCode's session store is invisible to the others by design.
+- **Curated memory, not replayed history.** OpenCode's answer to "what did we decide?" is a compaction summary: lossy, regenerated each time, and gone with the session. engrim stores typed records (`decision`, `fact`, `state`, `feedback`, `user`, `reference`) that can be superseded, tagged, and retired, and injects a priority-ordered pack of at most a few thousand characters instead of re-reading a transcript.
+- **Survives `/new`, compaction, and deleted sessions.** A fresh OpenCode session starts from `AGENTS.md` alone. With engrim the boot pack is injected again on every session and after every compaction, and the resume pointer says exactly where to pick up.
+- **Retrieval the model can drive.** Hybrid FTS5 + vector recall (`engrim_recall`), a per-prompt minder that surfaces the few records relevant to the message being answered, and explicit write access (`engrim_add`) so the agent can save a decision the moment it makes one.
+- **Provenance across tools.** Every record carries `origin_agent`, so you can see that a constraint came from a Codex session and a reversal came from OpenCode.
+- **A capture safety net.** `engrim review` and the compaction hook flag decisions that are still only in the transcript before they get summarised away; the session-idle hook keeps a flight-recorder log of turns so a hard window-close can't lose them.
+- **Portable and yours.** One SQLite file you can `engrim backup`, `engrim merge` into another store, share between host and container with `ENGRIM_PROJECT`, and inspect or edit with plain SQL. No vendor format, no cloud.
+
+If you only ever use OpenCode and never clear a session, `opencode.db` is enough. The moment a task spans two sessions or two tools, it isn't.
+
 #### Windsurf
 Add `engrim` to your `~/.codeium/windsurf/mcp_config.json`:
 ```json
@@ -160,7 +194,7 @@ See [`examples/gh-aw/`](examples/gh-aw/) for engrim inside [GitHub Agentic Workf
 ## 5. Agent Provenance Tracking
 
 When multiple agents collaborate on a single codebase, provenance matters. `engrim` records the origin of every memory entry with the `origin_agent` field:
-- Allowed values: `antigravity`, `claude-code`, `cursor`, `cli`, or `user`.
+- Allowed values: `antigravity`, `claude-code`, `cursor`, `opencode`, `cli`, or `user`.
 - Automatically populated based on the active hook, MCP client, or CLI session.
 - Subtly surfaced in `engrim context` and `engrim list`:
 
@@ -212,8 +246,8 @@ the reviewed log. It does not verify that logging captured the entire session.
 | `engrim add` | `engrim add -t decision -s "..." [--origin-agent agy]` | Insert memory record (types: `decision`, `fact`, `feedback`, `state`, `user`, `reference`). |
 | `engrim recall` | `engrim recall -q "database" [--tag auth]` | Ranked hybrid recall for the project (`--tag` filters by tag; `--log` searches raw turns). |
 | `engrim context` | `engrim context [-b 4000]` | Priority-ordered, budget-capped session-boot pack. |
-| `engrim hook` | `engrim hook --agent agy --event boot` | Agent lifecycle hook runner for Antigravity and Claude Code. |
-| `engrim setup` | `engrim setup [--agy\|--claude\|--cursor\|--codex\|--all] [--strict]` | Universal multi-agent environment configuration (`--strict` wires gate mode). |
+| `engrim hook` | `engrim hook --agent agy --event boot` | Agent lifecycle hook runner for Claude Code, Antigravity, and OpenCode (`--agent opencode --event boot\|prompt\|stop`, JSON on stdin). |
+| `engrim setup` | `engrim setup [--agy\|--claude\|--cursor\|--codex\|--opencode\|--all] [--strict]` | Universal multi-agent environment configuration (`--strict` wires gate mode). |
 | `engrim serve` | `engrim serve --mcp` | Start stdio MCP server for agent integrations. |
 | `engrim review` | `engrim review [--strict]` | "Safe to clear" coverage check: scans logs for uncurated decisions (`--strict` exits 2 if uncaptured). |
 | `engrim prune` | `engrim prune [--keep-days <N> \| --all \| --vacuum]` | Purge old transcript logs and VACUUM the SQLite DB (opt-in retention; off by default). |
@@ -242,7 +276,7 @@ the reviewed log. It does not verify that logging captured the entire session.
 There are several other memory solutions and coding assistants out there (such as gbrain, OpenCode, Codex, and Pi). Here is how `engrim` differs:
 
 - **vs gbrain**: While gbrain is a great provider-agnostic memory tool, `engrim` sets itself apart by using a lightweight, local-first SQLite architecture. This keeps everything fast and offline without needing complex setup or cloud dependencies.
-- **vs OpenCode & Codex**: While other solutions may have built-in SQLite or memory components, `engrim` is specifically designed as an *episodic* memory engine that tracks the *provenance* of decisions across multiple different agents (Antigravity, Claude Code, Cursor, Codex, Codex CLI). It operates as a unified backend that all your tools can share.
+- **vs OpenCode & Codex**: Their built-in SQLite stores hold *transcripts* (sessions, messages, compaction summaries) for one tool. `engrim` is an *episodic* memory engine that tracks the *provenance* of decisions across multiple different agents (Antigravity, Claude Code, Cursor, Codex CLI, OpenCode) and operates as a unified backend that all your tools share — with the OpenCode plugin, engrim becomes OpenCode's durable memory layer rather than competing with it. See [the OpenCode setup notes](#opencode) for the point-by-point case.
 - **vs Pi**: Pi acts as a personal AI companion with a long-term memory. `engrim` is specifically tailored for **coding projects** and software architecture—capturing decisions, state, and constraints in a format that coding agents can efficiently query via hybrid search (FTS5 + vector).
 
 ---
