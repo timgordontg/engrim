@@ -204,3 +204,20 @@ def test_bare_engrim_invoked_over_stdio_runs_mcp_server(tmp_path, monkeypatch, c
     assert resp["id"] == 1
     assert resp["result"]["serverInfo"]["name"] == "engrim"
 
+
+
+def _ctx(conn, **arguments):
+    arguments.setdefault("project", "/proj")
+    response = _run(conn, [{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                            "params": {"name": "engrim_context", "arguments": arguments}}])[0]
+    text = response["result"]["content"][0]["text"]
+    return json.loads(text), text
+
+
+def test_context_declares_result_size_hint():
+    # Claude Code persists oversized tool results to disk and shows the model a preview; the boot
+    # pack must not silently vanish that way. Only engrim_context needs the raised threshold.
+    ctx = next(t for t in TOOLS if t["name"] == "engrim_context")
+    size = ctx["_meta"]["anthropic/maxResultSizeChars"]
+    assert isinstance(size, int) and 0 < size <= 500_000
+

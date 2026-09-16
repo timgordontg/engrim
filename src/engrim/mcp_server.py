@@ -95,6 +95,10 @@ TOOLS = [
             },
             "required": ["project", "loaded", "total_active", "chars", "records"],
         },
+        # Claude Code persists any tool result above its default size threshold to a file and hands the
+        # model a short preview instead; a boot pack that silently vanishes defeats its purpose. This
+        # per-tool hint raises that threshold (ceiling 500k). Other clients ignore unknown _meta keys.
+        "_meta": {"anthropic/maxResultSizeChars": 120000},
     },
     {
         "name": "engrim_add",
