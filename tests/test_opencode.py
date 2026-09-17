@@ -128,7 +128,7 @@ def test_render_plugin_bakes_quoted_binary():
     src = host.render_plugin('"C:\\Users\\tim\\Scripts\\engrim.EXE"')
     assert 'const ENGRIM = "C:/Users/tim/Scripts/engrim.EXE"' in src
     assert "__ENGRIM_BIN__" not in src
-    for hook in ("experimental.chat.system.transform", "chat.message",
+    for hook in ("experimental.chat.system.transform", "chat.message", "experimental.chat.messages.transform",
                  "experimental.session.compacting", "session.idle"):
         assert hook in src
 
@@ -259,6 +259,10 @@ def test_plugin_source_has_review_fixes():
     assert "cmd|bat" in src and "ComSpec" in src  # Windows .cmd/.bat shims go through cmd.exe
     assert "PROMPT_TIMEOUT_MS" in src            # per-message minder has a short leash
     assert "MINDER_WAIT_MS" in src               # ...and the model call doesn't block on it
+    # The slice rides the user message as a synthetic part, never the system prompt: a system prompt
+    # that changes per prompt invalidates the provider's prefix cache for the whole context.
+    assert "synthetic: true" in src
+    assert "output.system.push(m)" not in src
     assert "ENGRIM_BOOT_BUDGET" in src and "budget: BOOT_BUDGET" in src   # README's budget knob is real
     assert host.AGENTS_MD.splitlines()[0] in src   # one usage text, baked from the AGENTS block
 
@@ -310,13 +314,43 @@ await plugin.event({ event: { type: "session.compacted", properties: { sessionID
 const sys3 = { system: [] }; await plugin["experimental.chat.system.transform"]({ sessionID: "S" }, sys3)
 const rebootAfterCompact = fs.existsSync(bootFile)     // compaction invalidates the cache: re-spawned
 const packOk = sys1.system.length === 1 && sys1.system[0].startsWith("PACK")
-console.log(JSON.stringify({ first, second, third, afterDelete, cachedBoot, rebootAfterCompact, packOk }))
+// Per-prompt minder: the slice rides the user message it was pulled for, never the system prompt.
+const user = (id, t) => ({ info: { id, role: "user" }, parts: [{ type: "text", text: t }] })
+const asst = (id) => ({ info: { id, role: "assistant" }, parts: [{ type: "text", text: "ok" }] })
+const req = (...m) => ({ messages: m })
+const tail = (r, i) => r.messages[i].parts
+fs.writeFileSync(dir + "SLOW_PROMPT", "")                 // cold spawn: slower than MINDER_WAIT_MS
+await plugin["chat.message"]({ sessionID: "S", messageID: "u2" }, { message: { id: "u2" }, parts: [{ type: "text", text: "what did we decide?" }] })
+const r1 = req(user("u1", "hello"), asst("a1"), user("u2", "what did we decide?"))
+await plugin["experimental.chat.messages.transform"]({}, r1)
+const sysAfterPrompt = { system: [] }; await plugin["experimental.chat.system.transform"]({ sessionID: "S" }, sysAfterPrompt)
+const firstRequestBare = tail(r1, 2).length === 1        // slice not ready: request 1 goes out without it
+await new Promise((r) => setTimeout(r, 2000))
+const r2 = req(user("u1", "hello"), asst("a1"), user("u2", "what did we decide?"))
+await plugin["experimental.chat.messages.transform"]({}, r2)
+const t2 = tail(r2, 2)
+const secondRequestHasSlice = t2.length === 2 && t2[1].type === "text" && t2[1].synthetic === true && t2[1].text === "SLICE"
+const historyUntouched = tail(r2, 0).length === 1       // u1 had no minder pull: nothing appended
+const systemStable = sysAfterPrompt.system.length === 1 && sysAfterPrompt.system[0].startsWith("PACK")
+fs.unlinkSync(dir + "SLOW_PROMPT")
+await plugin["chat.message"]({ sessionID: "S", messageID: "u3" }, { message: { id: "u3" }, parts: [{ type: "text", text: "and then?" }] })
+const r3 = req(user("u1", "hello"), asst("a1"), user("u2", "what did we decide?"), asst("a2"), user("u3", "and then?"))
+await plugin["experimental.chat.messages.transform"]({}, r3)
+const earlierSliceKept = tail(r3, 2).length === 2 && tail(r3, 2)[1].text === "SLICE"   // history renders identically
+const fastSliceOnFirstRequest = tail(r3, 4).length === 2 && tail(r3, 4)[1].text === "SLICE"  // warm spawn beats the wait
+await plugin.event({ event: { type: "session.deleted", properties: { info: { id: "S" } } } })
+const r4 = req(user("u2", "what did we decide?"), user("u3", "and then?"))
+await plugin["experimental.chat.messages.transform"]({}, r4)
+const droppedWithSession = tail(r4, 0).length === 1 && tail(r4, 1).length === 1
+console.log(JSON.stringify({ first, second, third, afterDelete, cachedBoot, rebootAfterCompact, packOk,
+  firstRequestBare, secondRequestHasSlice, historyUntouched, systemStable, earlierSliceKept, fastSliceOnFirstRequest, droppedWithSession }))
 """
 
 _FAKE_ENGRIM = """#!/bin/sh
 ev="$5"; cat > "$(dirname "$0")/last-$ev.json"
 if [ "$ev" = stop ] && [ -e "$(dirname "$0")/FAIL_STOP" ]; then exit 1; fi
 [ "$ev" = boot ] && echo PACK
+if [ "$ev" = prompt ]; then [ -e "$(dirname "$0")/SLOW_PROMPT" ] && sleep 3; echo SLICE; fi
 [ "$ev" = stop ] && echo '{"logged":1,"ok":true}'
 exit 0
 """
@@ -330,7 +364,9 @@ exit 0
 def test_plugin_flush_skips_summary_and_retries_failed_ingest(tmp_path):
     """Drive the real plugin under node with a fake engrim: compaction summaries are never sent,
     a failed stop-ingest leaves the turns pending for the next idle, and a successful one
-    retires them."""
+    retires them. Then the minder: its slice is appended to the user message it was pulled for
+    (on the first request it is ready for, and identically on every later one), never to the
+    system prompt, and is dropped with the session."""
     fake = tmp_path / "fake-engrim.sh"
     fake.write_text(_FAKE_ENGRIM, encoding="utf-8")
     fake.chmod(0o755)
@@ -340,4 +376,6 @@ def test_plugin_flush_skips_summary_and_retries_failed_ingest(tmp_path):
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout.strip().splitlines()[-1]) == {
         "first": ["u1", "a1"], "second": ["u1", "a1"], "third": False,
-        "afterDelete": ["u1", "a1"], "cachedBoot": True, "rebootAfterCompact": True, "packOk": True}
+        "afterDelete": ["u1", "a1"], "cachedBoot": True, "rebootAfterCompact": True, "packOk": True,
+        "firstRequestBare": True, "secondRequestHasSlice": True, "historyUntouched": True, "systemStable": True,
+        "earlierSliceKept": True, "fastSliceOnFirstRequest": True, "droppedWithSession": True}

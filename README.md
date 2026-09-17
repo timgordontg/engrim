@@ -212,7 +212,7 @@ engrim setup --opencode
 OpenCode has no shell hooks, so engrim ships as a plugin plus an MCP server:
 - Writes `~/.config/opencode/plugins/engrim.js` (respects `$XDG_CONFIG_HOME`). The plugin calls `engrim hook --agent opencode` at each lifecycle moment:
   - **session boot** → memory pack is injected into system prompt (once per session, and again after compaction);
-  - **every prompt** → minder pulls the few records relevant to that message;
+  - **every prompt** → minder pulls the few records relevant to that message and attaches them to that user message, never to the system prompt, so the provider's prompt cache (vLLM prefix cache, Anthropic prompt caching) stays warm across turns;
   - **session idle** → session's new user/assistant turns land in flight-recorder log (idempotent, keyed on OpenCode message ids);
   - **compaction** → compaction prompt is told that durable memory lives in engrim and to list uncaptured decisions so they get `engrim_add`-ed.
 - Registers `mcp.engrim` (`engrim serve --mcp`) in `~/.config/opencode/opencode.json`, exposing `engrim_*` tools to the agent.

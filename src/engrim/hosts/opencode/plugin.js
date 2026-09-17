@@ -6,7 +6,8 @@ const ENGRIM = __ENGRIM_BIN__
 const HOOK = ["hook", "--agent", "opencode", "--event"]
 // The minder runs on every message, so it gets a short leash: a slow spawn costs at most this.
 const PROMPT_TIMEOUT_MS = 4000
-// How long a model call will wait for an in-flight minder slice before going without it.
+// How long a model call will wait for the newest prompt's in-flight minder slice before going
+// without it (the slice then rides the next request of the same turn instead).
 const MINDER_WAIT_MS = 1500
 // Size cap (chars) for the boot pack that rides every model call; override in OpenCode's environment.
 const BOOT_BUDGET = Number(process.env.ENGRIM_BOOT_BUDGET) > 0 ? Number(process.env.ENGRIM_BOOT_BUDGET) : 4000
@@ -44,7 +45,7 @@ const USAGE = "The block above is this session's boot pack.\n\n" + __ENGRIM_USAG
 
 export const EngrimPlugin = async ({ client, directory }) => {
   const boot = new Map()    // sessionID -> boot pack (built once per session, rebuilt after compaction)
-  const minder = new Map()  // sessionID -> Promise<slice> for the message being answered (see chat.message)
+  const minder = new Map()  // user messageID -> { sid, slice, pending } (see chat.message)
   const seen = new Map()    // sessionID -> Set of message ids already logged
 
   const pack = async (sid) => {
@@ -90,25 +91,52 @@ export const EngrimPlugin = async ({ client, directory }) => {
   }
 
   return {
+    // System-prompt content is the head of every request, so the provider's prefix cache (vLLM,
+    // Anthropic prompt caching) survives only while it is byte-identical across calls. Only the
+    // per-session boot pack belongs here. Anything that changes per prompt -- the minder slice, a
+    // curate nudge, anything keyed on the message -- must ride the user message instead (see
+    // experimental.chat.messages.transform), or every new prompt re-prefills the whole context.
     "experimental.chat.system.transform": async (input, output) => {
       const sid = input.sessionID
       if (!sid) return
       const p = await pack(sid)
       if (p) output.system.push(p + "\n\n" + USAGE)
-      const pending = minder.get(sid)
-      if (pending) {
-        const m = await Promise.race([pending, new Promise((r) => setTimeout(() => r(""), MINDER_WAIT_MS))])
-        if (m) output.system.push(m)
-      }
     },
     "chat.message": async (input, output) => {
-      // Fire-and-forget: never hold the request path on a cold Python spawn. The next
-      // system.transform picks the slice up if it is ready within MINDER_WAIT_MS, otherwise the
-      // message goes out with the boot pack alone and the slice is dropped.
+      // Fire-and-forget: never hold the request path on a cold Python spawn. The slice is keyed on
+      // the user message it was pulled for; messages.transform attaches it to that message on every
+      // request from the moment it resolves (waiting at most MINDER_WAIT_MS on the first one).
       const sid = input.sessionID
-      const prompt = (output.parts || []).filter((p) => p.type === "text" && p.text).map((p) => p.text).join("\n")
-      if (prompt) minder.set(sid, text("prompt", { cwd: directory, session_id: sid, prompt }, PROMPT_TIMEOUT_MS))
-      else minder.delete(sid)
+      const mid = input.messageID || (output.message && output.message.id)
+      const prompt = (output.parts || []).filter((p) => p.type === "text" && !p.synthetic && p.text).map((p) => p.text).join("\n")
+      if (!sid || !mid || !prompt) return
+      const entry = { sid, slice: "", pending: null }
+      entry.pending = text("prompt", { cwd: directory, session_id: sid, prompt }, PROMPT_TIMEOUT_MS)
+        .then((m) => { entry.slice = m; entry.pending = null })
+      minder.set(mid, entry)
+    },
+    // Runs before every model call on a message list rebuilt from storage each time, so appending
+    // here is per-request, not cumulative. The slice goes on the user message it was pulled for --
+    // the tail of the prompt on its own turn, and unchanged history on every later one -- so the
+    // cached prefix ahead of it stays valid and nothing is ever persisted (flush never sees it).
+    "experimental.chat.messages.transform": async (input, output) => {
+      const msgs = output.messages || []
+      let last = null
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].info && msgs[i].info.role === "user") { last = msgs[i]; break }
+      }
+      const latest = last && minder.get(last.info.id)
+      if (latest && latest.pending) {
+        await Promise.race([latest.pending, new Promise((r) => setTimeout(r, MINDER_WAIT_MS))])
+      }
+      for (const m of msgs) {
+        const info = m.info || {}
+        const e = info.role === "user" && minder.get(info.id)
+        if (!e || !e.slice) continue
+        m.parts = m.parts || []
+        if (m.parts.some((p) => p.synthetic && p.text === e.slice)) continue
+        m.parts.push({ type: "text", text: e.slice, synthetic: true, messageID: info.id, sessionID: e.sid })
+      }
     },
     "experimental.session.compacting": async (input, output) => {
       await flush(input.sessionID)
@@ -126,7 +154,10 @@ export const EngrimPlugin = async ({ client, directory }) => {
       if (event.type === "session.compacted" && props.sessionID) boot.delete(props.sessionID)
       if (event.type === "session.deleted") {
         const sid = props.info && props.info.id
-        if (sid) { boot.delete(sid); minder.delete(sid); seen.delete(sid) }
+        if (sid) {
+          boot.delete(sid); seen.delete(sid)
+          for (const [mid, e] of minder) if (e.sid === sid) minder.delete(mid)
+        }
       }
     },
   }
