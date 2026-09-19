@@ -45,7 +45,7 @@ except ImportError:
 DEFAULT_DB = os.path.expanduser("~/.engrim/memory.db")
 TYPES = ("decision", "fact", "feedback", "state", "reference", "user")
 STATUSES = ("active", "superseded", "done")
-ORIGIN_AGENTS = ("antigravity", "claude-code", "cursor", "opencode", "cli", "user")
+ORIGIN_AGENTS = ("antigravity", "claude-code", "cursor", "opencode", "copilot", "cli", "user")
 # priority for the session-boot pack: how-to-work-with-user first, then state, then the rest
 _PRIO = {"user": 0, "feedback": 1, "state": 2, "decision": 3, "fact": 4, "reference": 5}
 
@@ -62,6 +62,8 @@ def _norm_agent(agent: str | None) -> str | None:
         return "cursor"
     if a in ("opencode", "open-code", "open_code"):
         return "opencode"
+    if a in ("copilot", "copilot-cli", "copilot_cli", "github-copilot"):
+        return "copilot"
     if a == "cli":
         return "cli"
     if a == "user":
@@ -77,6 +79,7 @@ def _agent_display(agent: str | None) -> str:
         "claude-code": "Claude Code",
         "cursor": "Cursor",
         "opencode": "OpenCode",
+        "copilot": "Copilot CLI",
         "cli": "CLI",
         "user": "User",
     }
@@ -752,8 +755,8 @@ def _assist_block(conn, project, prompt, k=5, budget=600) -> str:
 def cmd_statusline(conn, a) -> None:
     """Print one compact engrim status line for hosts with a command status-line slot.
 
-    Claude Code invokes this from `settings.json.statusLine`; Codex-shaped hook/session payloads are
-    also accepted so callers can use the same status command when a host exposes a command slot.
+    Claude Code and Copilot CLI invoke this from `settings.json.statusLine`; Codex-shaped
+    hook/session payloads are also accepted when another host exposes a command slot.
     """
     data, sess = {}, None
     try:
@@ -1139,6 +1142,19 @@ def cmd_hook(conn, a) -> None:
         fn(db_path=getattr(a, "db", None))
         return
 
+    if agent == "copilot":
+        from engrim.hosts.copilot.hooks import handle_session_start
+        payload = {}
+        try:
+            payload = json.load(sys.stdin) or {}
+        except Exception:
+            pass
+        event = getattr(a, "event", None) or "sessionstart"
+        if event not in ("boot", "sessionstart"):
+            sys.exit(f"Unknown event {event} for agent {agent}")
+        handle_session_start(conn, a, payload)
+        return
+
     if agent == "codex":
         # Codex supplies the stable workspace path as `cwd` and expects the same JSON hook output
         # shape as Claude Code. Do not run Claude's file-memory seed or transcript-directory sweep:
@@ -1183,9 +1199,10 @@ def cmd_hook(conn, a) -> None:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cmd_context(conn, a)
+    context = buf.getvalue().strip()
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "SessionStart",
-        "additionalContext": buf.getvalue().strip(),
+        "additionalContext": context,
     }}))
 
 
@@ -1702,7 +1719,8 @@ def _setup_claude(conn, a, engrim_bin: str, dry_run: bool = False) -> None:
 
 
 def cmd_setup(conn, a) -> None:
-    """Universal multi-agent setup: Antigravity, Claude Code, Cursor, and Codex."""
+    """Universal multi-agent setup: Antigravity, Claude Code, Cursor, Codex, OpenCode, Copilot CLI."""
+    from engrim.hosts.copilot import wiring as copilot_host
     from engrim.hosts.opencode import wiring as opencode_host
     engrim_bin = _hook_bin(shutil.which("engrim") or "engrim")
     dry_run = getattr(a, "dry_run", False)
@@ -1714,6 +1732,7 @@ def cmd_setup(conn, a) -> None:
         getattr(a, "cursor", False) or
         getattr(a, "codex", False) or
         getattr(a, "opencode", False) or
+        getattr(a, "copilot", False) or
         getattr(a, "all", False) or
         getattr(a, "settings", None)
     )
@@ -1723,6 +1742,7 @@ def cmd_setup(conn, a) -> None:
     wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
     wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
     wire_opencode = getattr(a, "opencode", False) or getattr(a, "all", False)
+    wire_copilot = getattr(a, "copilot", False) or getattr(a, "all", False)
 
     if not explicit:
         gemini_dir = os.path.expanduser("~/.gemini")
@@ -1745,13 +1765,16 @@ def cmd_setup(conn, a) -> None:
         if os.path.isdir(opencode_host.config_dir()):
             wire_opencode = True
             detected.append(f"OpenCode ({opencode_host.config_dir(pretty=True)})")
+        if os.path.isdir(copilot_host.home()):
+            wire_copilot = True
+            detected.append(f"Copilot CLI ({copilot_host.home(pretty=True)})")
 
         if detected:
             print(f"Auto-detected environments: {', '.join(detected)}")
         else:
             print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor, ~/.codex, "
-                  "~/.config/opencode).")
-            print("Defaulting to Claude Code setup. (Use --agy, --cursor, --codex, --opencode, or --all to wire others).")
+                  "~/.config/opencode, ~/.copilot).")
+            print("Defaulting to Claude Code setup. (Use --agy, --cursor, --codex, --opencode, --copilot, or --all to wire others).")
             wire_claude = True
 
     if wire_agy:
@@ -1762,6 +1785,8 @@ def cmd_setup(conn, a) -> None:
         _setup_cursor(engrim_bin, dry_run=dry_run)
     if wire_opencode:
         opencode_host.setup(engrim_bin, dry_run=dry_run)
+    if wire_copilot:
+        copilot_host.setup(engrim_bin, dry_run=dry_run)
     if wire_codex:
         _setup_codex(engrim_bin, dry_run=dry_run)
 
@@ -1790,7 +1815,7 @@ def cmd_setup(conn, a) -> None:
         else:
             print("• semantic recall unavailable (model2vec didn't load) - running pure-lexical for now")
 
-    if (wire_claude or wire_codex) and bin_error and not dry_run:
+    if (wire_claude or wire_codex or wire_copilot) and bin_error and not dry_run:
         sys.stdout.flush()
         sys.exit(f"\nNOT done - the hooks are written, but `{engrim_bin} --help` fails in a shell "
                  f"({bin_error}),\nso every one of them will silently do nothing. Fix that and "
@@ -1808,7 +1833,8 @@ def cmd_setup(conn, a) -> None:
 
 
 def cmd_uninstall(conn, a) -> None:
-    """Universal multi-agent uninstall: Antigravity, Claude Code, Cursor, and Codex."""
+    """Universal multi-agent uninstall: Antigravity, Claude Code, Cursor, Codex, OpenCode, Copilot CLI."""
+    from engrim.hosts.copilot import wiring as copilot_host
     from engrim.hosts.opencode import wiring as opencode_host
     dry_run = getattr(a, "dry_run", False)
     explicit = bool(
@@ -1817,6 +1843,7 @@ def cmd_uninstall(conn, a) -> None:
         getattr(a, "cursor", False) or
         getattr(a, "codex", False) or
         getattr(a, "opencode", False) or
+        getattr(a, "copilot", False) or
         getattr(a, "all", False) or
         getattr(a, "settings", None)
     )
@@ -1826,6 +1853,7 @@ def cmd_uninstall(conn, a) -> None:
     wire_cursor = getattr(a, "cursor", False) or getattr(a, "all", False)
     wire_codex = getattr(a, "codex", False) or getattr(a, "all", False)
     wire_opencode = getattr(a, "opencode", False) or getattr(a, "all", False)
+    wire_copilot = getattr(a, "copilot", False) or getattr(a, "all", False)
 
     if not explicit:
         gemini_dir = os.path.expanduser("~/.gemini")
@@ -1848,13 +1876,16 @@ def cmd_uninstall(conn, a) -> None:
         if os.path.isdir(opencode_host.config_dir()):
             wire_opencode = True
             detected.append(f"OpenCode ({opencode_host.config_dir(pretty=True)})")
+        if os.path.isdir(copilot_host.home()):
+            wire_copilot = True
+            detected.append(f"Copilot CLI ({copilot_host.home(pretty=True)})")
 
         if detected:
             print(f"Auto-detected environments: {', '.join(detected)}")
         else:
             print("No specific environment directories detected (~/.gemini, ~/.claude, ~/.cursor, ~/.codex, "
-                  "~/.config/opencode).")
-            print("Defaulting to Claude Code uninstall. (Use --agy, --cursor, --codex, --opencode, or --all to specify others).")
+                  "~/.config/opencode, ~/.copilot).")
+            print("Defaulting to Claude Code uninstall. (Use --agy, --cursor, --codex, --opencode, --copilot, or --all to specify others).")
             wire_claude = True
 
     if wire_agy:
@@ -1865,6 +1896,8 @@ def cmd_uninstall(conn, a) -> None:
         _uninstall_cursor(dry_run=dry_run)
     if wire_opencode:
         opencode_host.uninstall(dry_run=dry_run)
+    if wire_copilot:
+        copilot_host.uninstall(dry_run=dry_run, db_path=getattr(a, "db", None))
     if wire_codex:
         _uninstall_codex(dry_run=dry_run)
         
@@ -2055,6 +2088,8 @@ def cmd_doctor(conn, a) -> None:
     semantic embedding engine, and all supported AI coding agent environments."""
     import platform
     from engrim.hosts.opencode import wiring as opencode_host
+    from engrim.hosts.copilot.hooks import compatibility_marker
+    from engrim.hosts.copilot import wiring as copilot_host
 
     as_json = getattr(a, "json", False)
     do_fix = getattr(a, "fix", False)
@@ -2300,8 +2335,117 @@ def cmd_doctor(conn, a) -> None:
                 report["issues"].append(f"Failed to read Codex hooks.json: {e}")
         report["environments"]["codex"] = codex_env
 
+    # 3f. GitHub Copilot CLI (~/.copilot)
+    cp_marker = compatibility_marker(conn, project)
+    if os.path.isdir(copilot_host.home()) or cp_marker:
+        cp_env = {
+            "detected": os.path.isdir(copilot_host.home()),
+            "hooks": {},
+            "mcp": False,
+            "status_line": {"engrim": False},
+            "assistant_capture": {"healthy": cp_marker is None},
+        }
+        if cp_marker:
+            cp_env["assistant_capture"].update({
+                key: cp_marker.get(key)
+                for key in (
+                    "code",
+                    "event_type",
+                    "fields",
+                    "stream_version",
+                    "copilot_version",
+                    "fingerprint",
+                )
+            })
+            report["issues"].append(
+                "Copilot CLI assistant capture incompatible: "
+                f"{cp_marker.get('code', 'unknown schema error')}; run `engrim doctor` "
+                "after updating Engrim or completing a compatible Copilot turn"
+            )
+        hooks_path = os.path.join(copilot_host.home(), "hooks", copilot_host.HOOK_FILE)
+        expected_cp_hooks = {"sessionStart", "userPromptSubmitted", "agentStop"}
+        if os.path.exists(hooks_path):
+            try:
+                with open(hooks_path, "r", encoding="utf-8") as f:
+                    cpdata = json.load(f)
+                for evt, entries in (cpdata.get("hooks") or {}).items():
+                    for entry in entries or []:
+                        recorded = entry.get("exec") or entry.get("bash") or entry.get("command", "")
+                        if not _cmd_has(recorded, "engrim"):
+                            continue
+                        # `exec` entries record a bare path, which may contain spaces; quote it so
+                        # check_cmd_bin reads the whole path instead of splitting on whitespace.
+                        ok, reason = check_cmd_bin(f'"{recorded}"' if entry.get("exec") else recorded)
+                        cp_env["hooks"][evt] = {"command": recorded, "valid": ok, "reason": reason}
+                        if not ok:
+                            report["issues"].append(f"Copilot CLI {evt} hook broken: {reason}")
+                missing = expected_cp_hooks - set(cp_env["hooks"])
+                for evt in sorted(missing):
+                    report["issues"].append(f"Copilot CLI {evt} hook missing")
+            except Exception as e:
+                report["issues"].append(f"Failed to read Copilot hooks file: {e}")
+        mcp_path = os.path.join(copilot_host.home(), copilot_host.MCP_FILE)
+        if os.path.exists(mcp_path):
+            try:
+                with open(mcp_path, "r", encoding="utf-8") as f:
+                    cpcfg = json.load(f)
+                cp_mcp_cmd = (cpcfg.get("mcpServers") or {}).get("engrim", {}).get("command", "")
+                if cp_mcp_cmd:
+                    ok, reason = check_cmd_bin(f'"{cp_mcp_cmd}"')
+                    cp_env["mcp"] = ok
+                    if not ok:
+                        report["issues"].append(f"Copilot CLI MCP server broken: {reason}")
+            except Exception as e:
+                report["issues"].append(f"Failed to read Copilot mcp-config.json: {e}")
+        settings_path = os.path.join(
+            copilot_host.home(), copilot_host.SETTINGS_FILE
+        )
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    cp_settings = json.load(f)
+                status_line = cp_settings.get("statusLine")
+                if copilot_host.is_engrim_status_line(status_line):
+                    command = status_line["command"]
+                    ok, reason = check_cmd_bin(command)
+                    cp_env["status_line"] = {
+                        "engrim": True,
+                        "command": command,
+                        "valid": ok,
+                        "reason": reason,
+                    }
+                    if not ok:
+                        report["issues"].append(
+                            f"Copilot CLI status line broken: {reason}"
+                        )
+                elif status_line:
+                    cp_env["status_line"] = {
+                        "engrim": False,
+                        "reason": "custom status line preserved",
+                    }
+                else:
+                    report["warnings"].append(
+                        "Copilot CLI Engrim status line is not configured; "
+                        "run `engrim setup --copilot` to add it"
+                    )
+            except Exception as e:
+                report["issues"].append(
+                    f"Failed to read Copilot settings.json: {e}"
+                )
+        else:
+            report["warnings"].append(
+                "Copilot CLI Engrim status line is not configured; "
+                "run `engrim setup --copilot` to add it"
+            )
+        report["environments"]["copilot"] = cp_env
+
     # 4. Auto-Fix if requested
-    if do_fix and report["issues"]:
+    repairable_issues = [
+        issue
+        for issue in report["issues"]
+        if not issue.startswith("Copilot CLI assistant capture incompatible:")
+    ]
+    if do_fix and repairable_issues:
         engrim_bin = _hook_bin(shutil.which("engrim") or "engrim")
         if "antigravity" in report["environments"]:
             _setup_agy(engrim_bin, dry_run=False, strict=False)
@@ -2318,6 +2462,9 @@ def cmd_doctor(conn, a) -> None:
         if "opencode" in report["environments"]:
             opencode_host.setup(engrim_bin, dry_run=False)
             report["fixes"].append("Repaired OpenCode plugin & MCP server configuration")
+        if "copilot" in report["environments"]:
+            copilot_host.setup(engrim_bin, dry_run=False)
+            report["fixes"].append("Repaired Copilot CLI hooks & MCP server configuration")
 
     if as_json:
         print(json.dumps(report, indent=2))
@@ -2363,6 +2510,7 @@ def cmd_doctor(conn, a) -> None:
             "cursor": "Cursor (~/.cursor)",
             "opencode": f"OpenCode ({opencode_host.config_dir(pretty=True)})",
             "codex": "Codex CLI (~/.codex)",
+            "copilot": f"GitHub Copilot CLI ({copilot_host.home(pretty=True)})",
         }.get(env_name, env_name)
         print(f"  {title}:")
         if "hooks" in edata:
@@ -2383,6 +2531,28 @@ def cmd_doctor(conn, a) -> None:
         if "plugin" in edata:
             mark = "✓" if edata["plugin"] else "✖"
             print(f"    {mark} Plugin installed: {'yes' if edata['plugin'] else 'missing'}")
+        if "assistant_capture" in edata:
+            capture = edata["assistant_capture"]
+            if capture.get("healthy"):
+                print("    ✓ Assistant capture: healthy")
+            else:
+                print(
+                    "    ✖ Assistant capture: incompatible "
+                    f"({capture.get('code', 'unknown schema error')})"
+                )
+        if "status_line" in edata:
+            status_line = edata["status_line"]
+            if status_line.get("engrim") and status_line.get("valid"):
+                print("    ✓ Engrim status line: valid")
+            elif status_line.get("engrim"):
+                print(
+                    "    ✖ Engrim status line: "
+                    f"{status_line.get('reason', 'invalid')}"
+                )
+            elif status_line.get("reason") == "custom status line preserved":
+                print("    • Engrim status line: custom status line preserved")
+            else:
+                print("    • Engrim status line: not configured")
 
     print()
     print("=" * 80)
@@ -2392,6 +2562,18 @@ def cmd_doctor(conn, a) -> None:
             print(f"  ! {w}")
         print("-" * 80)
 
+    if cp_marker:
+        if report["fixes"]:
+            print("REPAIRS APPLIED:")
+            for fix in report["fixes"]:
+                print(f"  ✓ {fix}")
+            print("-" * 80)
+        print("ISSUES DETECTED:")
+        for iss in report["issues"]:
+            print(f"  ✖ {iss}")
+        print("=" * 80)
+        print("Action Required: Update Engrim if needed, then complete a compatible Copilot turn.")
+        sys.exit(1)
     if report["fixes"]:
         print("REPAIRS APPLIED:")
         for fix in report["fixes"]:
@@ -3055,6 +3237,12 @@ def cmd_log(conn, a) -> None:
             return
         if getattr(a, "agent", "claude") == "codex":
             _log_codex_hook(conn, payload, a.project)
+            return
+        if getattr(a, "agent", "claude") == "copilot":
+            from engrim.hosts.copilot.hooks import handle_log
+            response = handle_log(conn, payload, a.project)
+            if response is not None:
+                print(json.dumps(response))
             return
         # Resolve from the session's STABLE launch dir, not the hook process's os.getcwd(). A Stop
         # hook can be spawned with an incidental cwd (e.g. it inherits one a tool subprocess chdir'd
@@ -3822,12 +4010,12 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--json", action="store_true")
     pc.set_defaults(func=cmd_context)
 
-    ph = sub.add_parser("hook", help="Lifecycle hook JSON for Claude Code / Antigravity / Codex")
+    ph = sub.add_parser("hook", help="Lifecycle hook JSON for Claude Code / Antigravity / Codex / Copilot CLI")
     ph.add_argument("-p", "--project", default="auto")
     ph.add_argument("-b", "--budget", type=int, default=4000)
     ph.add_argument("--no-sync", action="store_true",
                     help="don't mirror Claude Code's file-memory before injecting")
-    ph.add_argument("--agent", choices=["claude", "agy", "antigravity", "codex", "opencode"], default="claude",
+    ph.add_argument("--agent", choices=["claude", "agy", "antigravity", "codex", "opencode", "copilot"], default="claude",
                      help="Target agent environment (default: claude)")
     ph.add_argument("--event", choices=["boot", "stop", "sessionstart", "prompt"], default=None,
                     help="Hook lifecycle event (default: boot or sessionstart; "
@@ -3849,7 +4037,7 @@ def build_parser() -> argparse.ArgumentParser:
     prt.add_argument("--json", action="store_true")
     prt.set_defaults(func=cmd_retire)
 
-    pse = sub.add_parser("setup", help="wire engrim into agent environments (Antigravity, Claude, Cursor, Codex, OpenCode)")
+    pse = sub.add_parser("setup", help="wire engrim into agent environments (Antigravity, Claude, Cursor, Codex, OpenCode, Copilot CLI)")
     pse.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
                      help="wire Antigravity hooks, deploy skill, and register MCP server")
     pse.add_argument("--claude", dest="claude", action="store_true",
@@ -3862,6 +4050,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="wire Codex CLI command hooks (MCP is optional and not required)")
     pse.add_argument("--opencode", dest="opencode", action="store_true",
                      help="write the OpenCode plugin, register the MCP server, and add AGENTS.md notes")
+    pse.add_argument("--copilot", "--copilot-cli", dest="copilot", action="store_true",
+                     help="wire Copilot CLI hooks, register the MCP server, and add instructions notes")
     pse.add_argument("--all", dest="all", action="store_true",
                      help="configure all detected agent environments")
     pse.add_argument("--dry-run", action="store_true",
@@ -3871,7 +4061,7 @@ def build_parser() -> argparse.ArgumentParser:
     pse.add_argument("--no-claude-md", action="store_true", help="don't touch ~/.claude/CLAUDE.md")
     pse.set_defaults(func=cmd_setup)
 
-    pun = sub.add_parser("uninstall", help="remove engrim from agent environments (Antigravity, Claude, Cursor, Codex, OpenCode)")
+    pun = sub.add_parser("uninstall", help="remove engrim from agent environments (Antigravity, Claude, Cursor, Codex, OpenCode, Copilot CLI)")
     pun.add_argument("--agy", "--antigravity", dest="agy", action="store_true",
                      help="remove Antigravity hooks, skill, and MCP server")
     pun.add_argument("--claude", dest="claude", action="store_true",
@@ -3882,6 +4072,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="remove Codex CLI hooks and MCP")
     pun.add_argument("--opencode", dest="opencode", action="store_true",
                      help="remove the OpenCode plugin, MCP entry, and AGENTS.md notes")
+    pun.add_argument("--copilot", "--copilot-cli", dest="copilot", action="store_true",
+                     help="remove Copilot CLI hooks, MCP entry, and instructions notes")
     pun.add_argument("--all", dest="all", action="store_true",
                      help="remove from all detected agent environments")
     pun.add_argument("--dry-run", action="store_true",
@@ -3934,7 +4126,7 @@ def build_parser() -> argparse.ArgumentParser:
     plog.add_argument("--from-transcript", help="ingest new turns from a Claude Code transcript JSONL")
     plog.add_argument("--hook", action="store_true",
                       help="read a Stop-hook JSON from stdin and ingest the session's new turns")
-    plog.add_argument("--agent", choices=["claude", "codex"], default="claude",
+    plog.add_argument("--agent", choices=["claude", "codex", "copilot"], default="claude",
                       help="hook payload source (default: claude)")
     plog.add_argument("--reindex", action="store_true",
                       help="re-derive searchable text from the raw turns already stored (recovers "

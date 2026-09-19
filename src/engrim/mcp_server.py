@@ -337,6 +337,8 @@ def serve(conn, inp=None, out=None) -> None:
                 detected_client = "cursor"
             elif "opencode" in cname:
                 detected_client = "opencode"
+            elif "copilot" in cname:       # Copilot CLI identifies as "copilot-cli"
+                detected_client = "copilot"
 
             client_ver = (msg.get("params") or {}).get("protocolVersion") or DEFAULT_PROTOCOL_VERSION
             _ok(rid, {

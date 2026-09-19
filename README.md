@@ -10,7 +10,7 @@
 
 **The Universal Cross-Model & Cross-Agent Episodic Memory Standard.**
 
-A local-first, project-scoped SQLite memory engine that allows developers to freely switch between models and environments (**Google Antigravity**, **Claude Code**, **Cursor**, **Codex CLI**, **OpenCode**, and **Windsurf**) on the **same codebase** without losing architectural decisions, user constraints, or project state.
+A local-first, project-scoped SQLite memory engine that allows developers to freely switch between models and environments (**Google Antigravity**, **Claude Code**, **Cursor**, **Codex CLI**, **GitHub Copilot CLI**, **OpenCode**, and **Windsurf**) on the **same codebase** without losing architectural decisions, user constraints, or project state.
 
 ---
 
@@ -28,8 +28,8 @@ It solves the **"200,000-token context window trap"** (where coding models suffe
 |:---|:---|:---|
 | **Context Window** | **Attention Dilution**: 150k+ tokens re-sent on every turn; models lose reasoning sharpness and hallucinate past constraints. | **Precision Working Memory**: ~4,000 chars (<1,000 tokens, <1% of context) injected at boot. Zero attention dilution. |
 | **Session Clearing** | **Context Reset on `/clear`**: Clearing chat wipes agent context to zero; you spend minutes re-explaining rules and architecture. | **Continue-As-Clear**: Clear anytime (`/clear`). Decisions, active state, and `[▶ RESUME HERE]` reload instantly. |
-| **Agent Ecosystem** | **Vendor Silos**: Decisions made in Claude Code are invisible in Antigravity, Cursor, Codex, or OpenCode. | **Universal Substrate**: One local SQLite store (`~/.engrim/memory.db`) shared across all 5 major harnesses. |
-| **Hook Reliability** | **Silent Failures**: Moving across machines or OSes silently breaks hardcoded binary paths with no error message. | **Self-Healing Diagnostics**: `engrim doctor --fix` verifies all hooks and installs portable PATH fallbacks. |
+| **Agent Ecosystem** | **Vendor Silos**: Decisions made in Claude Code are invisible in Antigravity, Cursor, Codex, Copilot CLI, or OpenCode. | **Universal Substrate**: One local SQLite store (`~/.engrim/memory.db`) shared across all 6 major harnesses. |
+| **Hook Reliability** | **Silent Failures**: Moving across machines or OSes silently breaks hardcoded binary paths with no error message. | **Self-Healing Diagnostics**: `engrim doctor --fix` checks the supported hook and MCP configurations and repairs stale binary paths. |
 | **Data Privacy** | **SaaS Cloud Leakage**: Proprietary code and architectural constraints sent to third-party memory APIs. | **100% Local & Private**: Stored locally in SQLite WAL mode (POSIX `0600`). No telemetry, no cloud sync, no tracking. |
 
 ---
@@ -44,10 +44,11 @@ graph TD
         CURSOR["Cursor / Windsurf<br/>(Model Context Protocol stdio)"]
         CODEX["Codex CLI<br/>(Native command hooks)"]
         OPENCODE["OpenCode<br/>(Plugin & MCP)"]
+        COPILOT["GitHub Copilot CLI<br/>(Command hooks & MCP)"]
     end
 
     subgraph CoreEngine ["engrim Core Engine (v1.4.8)"]
-        ADAPTERS["Adapters & Lifecycle Hooks<br/>(agy, claude, opencode, mcp)"]
+        ADAPTERS["Adapters & Lifecycle Hooks<br/>(agy, claude, opencode, copilot, mcp)"]
         DOCTOR["Health & Diagnostic Engine<br/>(engrim doctor --fix)"]
         PROVENANCE["Agent Provenance Engine<br/>(origin_agent tracking)"]
         ROUTER["Hybrid Retrieval & Minder<br/>(bm25 lexical + vector cosine)"]
@@ -65,6 +66,7 @@ graph TD
     CURSOR <-->|"JSON-RPC (stdio)"| ADAPTERS
     CODEX <-->|"command hook"| ADAPTERS
     OPENCODE <-->|"plugin / MCP"| ADAPTERS
+    COPILOT <-->|"command hook / MCP"| ADAPTERS
     ADAPTERS --> PROVENANCE
     PROVENANCE --> ROUTER
     ROUTER --> MEMORIES
@@ -101,6 +103,7 @@ engrim setup
 - If `~/.cursor` exists $\rightarrow$ generates and merges Cursor MCP configuration.
 - If `~/.codex` exists $\rightarrow$ wires Codex CLI native command hooks.
 - If `~/.config/opencode` exists $\rightarrow$ writes OpenCode plugin, registers MCP server, and adds `AGENTS.md` notes.
+- If `~/.copilot` exists $\rightarrow$ wires Copilot CLI hooks and the Engrim status line, registers the MCP server, and adds `copilot-instructions.md` notes.
 
 ---
 
@@ -205,6 +208,22 @@ engrim setup --codex
 - Wires `SessionStart`, `SessionEnd`, `Stop`, and `UserPromptSubmit` command hooks in `~/.codex/hooks.json`.
 - Calls local `engrim` CLI directly (MCP not required). Hooks must be reviewed and trusted with Codex's `/hooks` command before they run.
 
+#### 🤖 GitHub Copilot CLI
+```bash
+engrim setup --copilot
+```
+- Writes `~/.copilot/hooks/engrim.json` (respects `$COPILOT_HOME`), a file engrim owns outright, so your other hook files are never rewritten.
+  - **`sessionStart`** → the memory pack is returned as `additionalContext` and injected into the new session before your first prompt.
+  - **`userPromptSubmitted`** → the prompt lands in the flight-recorder log. Copilot CLI discards the output of command hooks on this event, so this hook injects nothing.
+  - **`agentStop`** → assistant messages are read from the supplied `events.jsonl` transcript path and added to the flight-recorder log.
+- Registers `mcpServers.engrim` (`engrim serve --mcp`) in `~/.copilot/mcp-config.json`, exposing the `engrim_*` tools. Records the agent writes are attributed to `copilot` automatically.
+- Configures `engrim statusline` in `~/.copilot/settings.json`, providing live curated, logged, in-play, and clear-safety counts. An existing custom status line is preserved.
+- Appends a usage note to `~/.copilot/copilot-instructions.md`.
+
+Hook entries use Copilot's `exec` + `args` form, which runs the binary directly with no shell in between, so a path containing spaces or backslashes needs no quoting. Hook configuration is read at startup: open a **new** session after setup.
+
+Copilot can flush the final assistant event shortly after `agentStop` begins, so Engrim polls briefly and recovers any later tail during the next session start. The event-file schema is not a public Copilot compatibility contract. Engrim detects incompatible known records without putting transcript content in diagnostics, warns once through the hook, and reports the persistent issue through `engrim doctor` until a compatible pass succeeds.
+
 #### 🟩 OpenCode
 ```bash
 engrim setup --opencode
@@ -250,7 +269,7 @@ In production testing on an active algorithmic trading codebase running real cap
 ## 5. Agent Provenance Tracking
 
 When multiple agents collaborate on a single codebase, provenance matters. `engrim` records the origin of every memory entry with the `origin_agent` field:
-- Allowed values: `antigravity`, `claude-code`, `cursor`, `opencode`, `cli`, or `user`.
+- Allowed values: `antigravity`, `claude-code`, `cursor`, `opencode`, `copilot`, `cli`, or `user`.
 - Automatically populated based on the active hook, MCP client, or CLI session.
 - Subtly surfaced in `engrim context` and `engrim list`:
 
@@ -300,8 +319,8 @@ engrim serve --mcp
 | `engrim recall` | `engrim recall -q "database" [--tag auth]` | Ranked hybrid recall for the project (`--tag` filters by tag; `--log` searches raw turns). |
 | `engrim context` | `engrim context [-b 4000]` | Priority-ordered, budget-capped session-boot pack. |
 | `engrim doctor` | `engrim doctor [--fix] [--json]` | Comprehensive health & environment diagnostic across SQLite, semantic engine, and hooks (`--fix` auto-repairs paths). |
-| `engrim hook` | `engrim hook --agent agy --event boot` | Agent lifecycle hook runner for Claude Code, Antigravity, and OpenCode (`--agent opencode --event boot\|prompt\|stop`). |
-| `engrim setup` | `engrim setup [--agy\|--claude\|--cursor\|--codex\|--opencode\|--all] [--strict]` | Universal multi-agent environment configuration (`--strict` wires gate mode). |
+| `engrim hook` | `engrim hook --agent agy --event boot` | Agent lifecycle hook runner for Claude Code, Antigravity, Codex, Copilot CLI, and OpenCode (`--agent opencode --event boot\|prompt\|stop`). |
+| `engrim setup` | `engrim setup [--agy\|--claude\|--cursor\|--codex\|--opencode\|--copilot\|--all] [--strict]` | Universal multi-agent environment configuration (`--strict` wires gate mode). |
 | `engrim serve` | `engrim serve --mcp` | Start stdio MCP server for agent integrations. |
 | `engrim review` | `engrim review [--strict]` | "Safe to clear" coverage check: scans logs for uncurated decisions (`--strict` exits 2 if uncaptured). |
 | `engrim prune` | `engrim prune [--keep-days <N> \| --all \| --vacuum]` | Purge old transcript logs and VACUUM the SQLite DB (opt-in retention; off by default). |
@@ -334,7 +353,7 @@ Engrim maintains a strict, transparent architectural boundary between open-sourc
 | **Target User** | Individual developers & local coding agents | Engineering teams & autonomous CI/CD pipelines |
 | **Storage Substrate** | 100% local SQLite WAL (`~/.engrim/memory.db`) | In-VPC high-throughput state collector & team repository |
 | **Retrieval Engine** | Hybrid FTS5 bm25 + `model2vec` (CPU, ~30ms) | Organization-wide semantic search & multi-tenant indexing |
-| **Agent Support** | Antigravity, Claude Code, Cursor, Codex, OpenCode | Distributed container fleets & autonomous CI state-machines |
+| **Agent Support** | Antigravity, Claude Code, Cursor, Codex, Copilot CLI, OpenCode | Distributed container fleets & autonomous CI state-machines |
 | **Integrity & Health** | `engrim doctor` diagnostic & self-healing hooks | Pre-commit AST invariant arbiter & deterministic validation |
 | **Security & Compliance** | POSIX `0600` owner permissions, offline | Secret & PII scrubber, cryptographic Merkle compliance ledger |
 | **Collaboration** | Local merge & backup (`engrim merge/backup`) | Multi-developer team memory federation & Linear-grade web UI |
