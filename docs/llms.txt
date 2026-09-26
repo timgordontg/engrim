@@ -1,0 +1,18 @@
+# engrim
+> Local-first cross-session episodic memory for AI coding agents.
+
+## Overview
+engrim is a zero-dependency, local-first memory engine for AI coding tools including Claude Code, Cursor, Google Antigravity, and GitHub Copilot CLI. It persists architectural decisions, measured outcomes, and project state in local SQLite with hybrid BM25 and vector search.
+
+## Key Features
+- Sub-4k character boot pack: restores context without flooding context windows
+- Local SQLite: zero telemetry, zero cloud accounts, no API keys
+- Integrations: Claude Code hooks, Cursor MCP, Google Antigravity
+
+## Quickstart
+pip install engrim && engrim setup
+
+## Links
+- Website: https://engrim.dev
+- GitHub: https://github.com/timgordontg/engrim
+- PyPI: https://pypi.org/project/engrim/

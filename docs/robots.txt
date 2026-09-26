@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://engrim.dev/sitemap.xml
